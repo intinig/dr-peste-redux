@@ -22,14 +22,21 @@ impl Config {
             .parse::<u64>()
             .context("GUILD_ID must be a valid u64")?;
         let poll_interval_mins = match get("POLL_INTERVAL_MINS") {
-            Some(v) => v.parse::<u64>().context("POLL_INTERVAL_MINS must be a u64")?,
+            Some(v) => v
+                .parse::<u64>()
+                .context("POLL_INTERVAL_MINS must be a u64")?,
             None => 30,
         };
         let min_volume = match get("MIN_VOLUME") {
             Some(v) => v.parse::<f64>().context("MIN_VOLUME must be a number")?,
             None => 0.0,
         };
-        Ok(Self { discord_token, guild_id, poll_interval_mins, min_volume })
+        Ok(Self {
+            discord_token,
+            guild_id,
+            poll_interval_mins,
+            min_volume,
+        })
     }
 }
 
@@ -39,8 +46,10 @@ mod tests {
     use std::collections::HashMap;
 
     fn lookup(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
-        let map: HashMap<String, String> =
-            pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let map: HashMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
         move |k| map.get(k).cloned()
     }
 
@@ -61,7 +70,8 @@ mod tests {
 
     #[test]
     fn applies_defaults() {
-        let cfg = Config::from_lookup(lookup(&[("DISCORD_TOKEN", "abc"), ("GUILD_ID", "1")])).unwrap();
+        let cfg =
+            Config::from_lookup(lookup(&[("DISCORD_TOKEN", "abc"), ("GUILD_ID", "1")])).unwrap();
         assert_eq!(cfg.poll_interval_mins, 30);
         assert_eq!(cfg.min_volume, 0.0);
     }

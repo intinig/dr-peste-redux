@@ -30,7 +30,11 @@ pub fn select_current_league(v: &serde_json::Value) -> Option<League> {
         .or_else(|| leagues.first())?;
     Some(League {
         name: pick.get("name")?.as_str()?.to_string(),
-        url: pick.get("url").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        url: pick
+            .get("url")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
     })
 }
 
@@ -87,7 +91,9 @@ impl NinjaClient {
         for cat in CATEGORIES {
             match self.fetch_category(league, cat).await {
                 Ok(mut items) => all.append(&mut items),
-                Err(e) => tracing::warn!(category = cat.slug, error = %e, "failed to fetch category"),
+                Err(e) => {
+                    tracing::warn!(category = cat.slug, error = %e, "failed to fetch category")
+                }
             }
         }
         all

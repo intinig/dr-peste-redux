@@ -49,7 +49,10 @@ pub fn search<'a>(items: &'a [PricedItem], query: &str, limit: usize) -> Vec<&'a
         .iter()
         .filter_map(|it| matcher.fuzzy_match(&it.name, query).map(|s| (s, it)))
         .collect();
-    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.name.len().cmp(&b.1.name.len())));
+    scored.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| a.1.name.len().cmp(&b.1.name.len()))
+    });
     scored.into_iter().take(limit).map(|(_, it)| it).collect()
 }
 
@@ -69,13 +72,17 @@ pub fn farm<'a>(
     let mut filtered: Vec<&PricedItem> = items
         .iter()
         .filter(|it| it.volume >= min_volume)
-        .filter(|it| slug.map_or(true, |s| it.slug == s))
+        .filter(|it| slug.is_none_or(|s| it.slug == s))
         .collect();
     let key = |it: &&PricedItem| match sort {
         FarmSort::Value => it.value_chaos,
         FarmSort::Trending => it.change_pct,
     };
-    filtered.sort_by(|a, b| key(b).partial_cmp(&key(a)).unwrap_or(std::cmp::Ordering::Equal));
+    filtered.sort_by(|a, b| {
+        key(b)
+            .partial_cmp(&key(a))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     filtered.into_iter().take(limit).collect()
 }
 
@@ -172,21 +179,36 @@ mod tests {
     #[test]
     fn route_rejects_rare_gear() {
         let items = sample();
-        let parsed = ParsedItem { rarity: Rarity::Rare, name: "Corpse Bramble".into(), base_type: Some("Vaal Regalia".into()) };
+        let parsed = ParsedItem {
+            rarity: Rarity::Rare,
+            name: "Corpse Bramble".into(),
+            base_type: Some("Vaal Regalia".into()),
+        };
         assert!(matches!(route(&items, &parsed), MatchOutcome::NotTracked));
     }
 
     #[test]
     fn route_finds_unique_by_name() {
         let items = sample();
-        let parsed = ParsedItem { rarity: Rarity::Unique, name: "The Dancing Dervish".into(), base_type: Some("Scimitar".into()) };
+        let parsed = ParsedItem {
+            rarity: Rarity::Unique,
+            name: "The Dancing Dervish".into(),
+            base_type: Some("Scimitar".into()),
+        };
         assert!(matches!(route(&items, &parsed), MatchOutcome::Found(_)));
     }
 
     #[test]
     fn route_suggests_when_no_exact_match() {
         let items = sample();
-        let parsed = ParsedItem { rarity: Rarity::Currency, name: "Divine".into(), base_type: None };
-        assert!(matches!(route(&items, &parsed), MatchOutcome::Suggestions(_)));
+        let parsed = ParsedItem {
+            rarity: Rarity::Currency,
+            name: "Divine".into(),
+            base_type: None,
+        };
+        assert!(matches!(
+            route(&items, &parsed),
+            MatchOutcome::Suggestions(_)
+        ));
     }
 }
