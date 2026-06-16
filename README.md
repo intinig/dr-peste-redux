@@ -7,9 +7,10 @@ economy data.
 ## Commands
 
 - **`/price item:<name>`** — look up an item's value, with live autocomplete.
-- **`/pricecheck`** — opens a popup; paste a copied in-game item (Ctrl+C) and it
+- **`/paste`** — opens a popup; paste a copied in-game item (Ctrl+C) and it
   matches and prices it. Rare/magic gear (which poe.ninja doesn't price) gets a
   clear "not tracked" reply.
+- **`/help`** — lists the available commands.
 - **`/farm [category] [sort:value|trending]`** — the most valuable items, or the
   biggest price movers, ranked from live data with a minimum-volume filter.
 

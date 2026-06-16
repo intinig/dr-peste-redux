@@ -1,7 +1,8 @@
 pub mod embeds;
 pub mod farm;
+pub mod help;
+pub mod paste;
 pub mod price;
-pub mod pricecheck;
 
 use futures::Stream;
 

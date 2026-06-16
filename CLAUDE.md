@@ -14,8 +14,9 @@ Read it before making architectural changes.
 ## Command surfaces
 
 - `/price item:<autocomplete>` — look up an item's value by name.
-- `/pricecheck` — opens a modal; user pastes a copied in-game item, bot parses
+- `/paste` — opens a modal; user pastes a copied in-game item, bot parses
   and matches it.
+- `/help` — lists the available commands (ephemeral embed).
 - `/farm [category] [sort:value|trending]` — most valuable / biggest movers.
 
 ## Architecture
@@ -39,7 +40,7 @@ src/
   main.rs            config.rs            itemtext.rs (PoE2 clipboard parser)
   poeninja/          mod.rs  categories.rs  model.rs
   store.rs
-  discord/           mod.rs  price.rs  pricecheck.rs  farm.rs  embeds.rs
+  discord/           mod.rs  price.rs  paste.rs  help.rs  farm.rs  embeds.rs
 ```
 
 ## poe.ninja API notes (load-bearing details)
@@ -88,8 +89,8 @@ Keep a committed `.env.example` documenting the keys with placeholder values.
 - Async throughout (`tokio`); the store is the only shared mutable state.
 - Keep `poeninja`, `store`, and `discord` decoupled — data flows
   poe.ninja → store → discord, never sideways.
-- Errors: `anyhow` at boundaries, `thiserror` for typed module errors; log with
-  `tracing`. The refresher must never panic the process on a fetch/parse error.
+- Errors: `anyhow` throughout; log with `tracing`. The refresher must never
+  panic the process on a fetch/parse error.
 - Tests are offline by default; anything hitting the network is `#[ignore]`d.
 
 ## Hard rules

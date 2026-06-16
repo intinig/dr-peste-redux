@@ -17,3 +17,4 @@ Cargo.lock.orig
 # Tooling scratch
 .playwright-mcp/
 .remember/
+.serena/

@@ -67,7 +67,8 @@ async fn main() -> Result<()> {
             commands: vec![
                 discord::price::price(),
                 discord::farm::farm(),
-                discord::pricecheck::pricecheck(),
+                discord::paste::paste(),
+                discord::help::help(),
             ],
             ..Default::default()
         })
