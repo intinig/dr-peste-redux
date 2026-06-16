@@ -1,4 +1,5 @@
 mod config;
+mod itemtext;
 mod poeninja;
 
 fn main() {
