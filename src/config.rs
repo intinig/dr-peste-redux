@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Config {
     pub discord_token: String,
     pub guild_id: u64,
@@ -37,6 +37,17 @@ impl Config {
             poll_interval_mins,
             min_volume,
         })
+    }
+}
+
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("discord_token", &"[REDACTED]")
+            .field("guild_id", &self.guild_id)
+            .field("poll_interval_mins", &self.poll_interval_mins)
+            .field("min_volume", &self.min_volume)
+            .finish()
     }
 }
 

@@ -40,6 +40,7 @@ pub fn item_embed(it: &PricedItem, league: &League) -> serenity::CreateEmbed {
         .field("Value", best_price_string(it), true)
         .field("Trend", trend_string(it.change_pct), true)
         .field("Category", it.category.clone(), true)
+        .field("Volume", format!("{:.0}", it.volume), true)
         .footer(serenity::CreateEmbedFooter::new(format!(
             "poe.ninja • {}",
             league.name
@@ -112,5 +113,20 @@ mod tests {
     fn trend_string_has_direction() {
         assert!(trend_string(5.0).contains("+5.0%"));
         assert!(trend_string(-5.0).contains("-5.0%"));
+    }
+
+    #[test]
+    fn ninja_url_uses_poe2_economy_path() {
+        let mut it = item(0.0, 0.0, 5.0);
+        it.slug = "currency".into();
+        it.details_id = "divine-orb".into();
+        let league = League {
+            name: "Runes of Aldur".into(),
+            url: "runesofaldur".into(),
+        };
+        assert_eq!(
+            ninja_url(&it, &league),
+            "https://poe.ninja/poe2/economy/runesofaldur/currency/divine-orb"
+        );
     }
 }

@@ -17,6 +17,10 @@ use store::{PriceStore, Snapshot};
 async fn refresh_once(client: &NinjaClient, store: &PriceStore) -> Result<()> {
     let league = client.current_league().await?;
     let items = client.fetch_all(&league.name).await;
+    if items.is_empty() {
+        tracing::warn!(league = %league.name, "all categories returned no items; keeping last snapshot");
+        return Ok(());
+    }
     tracing::info!(league = %league.name, count = items.len(), "snapshot refreshed");
     store.replace(Snapshot { league, items }).await;
     Ok(())
