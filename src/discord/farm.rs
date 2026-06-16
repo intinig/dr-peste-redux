@@ -20,13 +20,15 @@ pub async fn farm(
     category: Option<String>,
 ) -> Result<(), Error> {
     let Some(snap) = ctx.data().store.snapshot().await else {
-        ctx.say("Still warming up — try again in a few seconds.").await?;
+        ctx.say("Still warming up — try again in a few seconds.")
+            .await?;
         return Ok(());
     };
 
     if let Some(slug) = &category {
         if by_slug(slug).is_none() {
-            ctx.say(format!("Unknown category `{slug}`. Try autocomplete.")).await?;
+            ctx.say(format!("Unknown category `{slug}`. Try autocomplete."))
+                .await?;
             return Ok(());
         }
     }

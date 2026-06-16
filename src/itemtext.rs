@@ -46,7 +46,11 @@ pub fn parse(text: &str) -> Option<ParsedItem> {
         .filter(|s| !s.is_empty() && !is_separator(s))
         .map(|s| s.to_string());
 
-    Some(ParsedItem { rarity, name, base_type })
+    Some(ParsedItem {
+        rarity,
+        name,
+        base_type,
+    })
 }
 
 #[cfg(test)]
@@ -55,7 +59,8 @@ mod tests {
 
     const UNIQUE: &str = "Item Class: One Hand Swords\r\nRarity: Unique\r\nThe Dancing Dervish\r\nScimitar\r\n--------\r\nLevel: 16\r\n";
     const CURRENCY: &str = "Item Class: Stackable Currency\nRarity: Currency\nDivine Orb\n--------\nStack Size: 1/10\n";
-    const RARE: &str = "Item Class: Body Armours\nRarity: Rare\nCorpse Bramble\nVaal Regalia\n--------\n";
+    const RARE: &str =
+        "Item Class: Body Armours\nRarity: Rare\nCorpse Bramble\nVaal Regalia\n--------\n";
 
     #[test]
     fn parses_unique_with_base() {

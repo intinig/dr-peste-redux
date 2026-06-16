@@ -10,7 +10,8 @@ pub async fn price(
     item: String,
 ) -> Result<(), Error> {
     let Some(snap) = ctx.data().store.snapshot().await else {
-        ctx.say("Still warming up — try again in a few seconds.").await?;
+        ctx.say("Still warming up — try again in a few seconds.")
+            .await?;
         return Ok(());
     };
 
@@ -30,8 +31,10 @@ pub async fn price(
             .map(|i| format!("• {}", i.name))
             .collect::<Vec<_>>()
             .join("\n");
-        ctx.say(format!("No exact match for **{item}**. Did you mean:\n{names}"))
-            .await?;
+        ctx.say(format!(
+            "No exact match for **{item}**. Did you mean:\n{names}"
+        ))
+        .await?;
     }
     Ok(())
 }

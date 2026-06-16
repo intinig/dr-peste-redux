@@ -119,8 +119,7 @@ fn absolute_icon(path: String) -> String {
 }
 
 pub fn normalize_exchange(cat: &Category, ov: ExchangeOverview) -> Vec<PricedItem> {
-    let meta: HashMap<&str, &ExchangeItem> =
-        ov.items.iter().map(|i| (i.id.as_str(), i)).collect();
+    let meta: HashMap<&str, &ExchangeItem> = ov.items.iter().map(|i| (i.id.as_str(), i)).collect();
     ov.lines
         .iter()
         .filter_map(|line| {
@@ -183,7 +182,10 @@ mod tests {
         assert!((divine.value_exalted - 184.7).abs() < 1e-6);
         assert_eq!(divine.change_pct, 74.02);
         assert_eq!(divine.category, "Currency");
-        assert_eq!(divine.icon_url.as_deref(), Some("https://poe.ninja/gen/image/divine.png"));
+        assert_eq!(
+            divine.icon_url.as_deref(),
+            Some("https://poe.ninja/gen/image/divine.png")
+        );
     }
 
     #[test]
@@ -199,6 +201,9 @@ mod tests {
         assert_eq!(d.value_divine, 5822.0);
         assert!((d.value_chaos - 5822.0 * 11.27).abs() < 1e-3);
         assert_eq!(d.volume, 2.0);
-        assert_eq!(d.icon_url.as_deref(), Some("https://web.poecdn.com/gen/image/dervish.png"));
+        assert_eq!(
+            d.icon_url.as_deref(),
+            Some("https://web.poecdn.com/gen/image/dervish.png")
+        );
     }
 }
