@@ -126,4 +126,14 @@ mod tests {
         let v = serde_json::json!({});
         assert!(select_current_league(&v).is_none());
     }
+
+    #[tokio::test]
+    #[ignore = "hits the live poe.ninja API"]
+    async fn live_fetch_currency_has_divine() {
+        let client = NinjaClient::new().unwrap();
+        let league = client.current_league().await.unwrap();
+        let cat = super::categories::by_slug("currency").unwrap();
+        let items = client.fetch_category(&league.name, cat).await.unwrap();
+        assert!(items.iter().any(|i| i.name == "Divine Orb"), "expected Divine Orb in currency");
+    }
 }
