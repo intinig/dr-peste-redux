@@ -27,6 +27,9 @@ impl Config {
                 .context("POLL_INTERVAL_MINS must be a u64")?,
             None => 30,
         };
+        if poll_interval_mins == 0 {
+            anyhow::bail!("POLL_INTERVAL_MINS must be at least 1 (got 0)");
+        }
         let min_volume = match get("MIN_VOLUME") {
             Some(v) => v.parse::<f64>().context("MIN_VOLUME must be a number")?,
             None => 0.0,
@@ -95,5 +98,15 @@ mod tests {
     #[test]
     fn non_numeric_guild_errors() {
         assert!(Config::from_lookup(lookup(&[("DISCORD_TOKEN", "a"), ("GUILD_ID", "x")])).is_err());
+    }
+
+    #[test]
+    fn rejects_zero_poll_interval() {
+        assert!(Config::from_lookup(lookup(&[
+            ("DISCORD_TOKEN", "a"),
+            ("GUILD_ID", "1"),
+            ("POLL_INTERVAL_MINS", "0"),
+        ]))
+        .is_err());
     }
 }
