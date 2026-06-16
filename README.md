@@ -1,5 +1,7 @@
 # dr-peste-redux
 
+[![CI](https://github.com/intinig/dr-peste-redux/actions/workflows/ci.yml/badge.svg)](https://github.com/intinig/dr-peste-redux/actions/workflows/ci.yml)
+
 A self-hosted Discord bot for a **Path of Exile 2** guild. It price-checks items
 and tells you what's worth farming, using [poe.ninja](https://poe.ninja)'s PoE2
 economy data.
@@ -69,6 +71,13 @@ All config is via environment variables (loaded from `.env` locally):
 ```bash
 docker build -t dr-peste-redux .
 docker run --rm --env-file .env dr-peste-redux
+```
+
+Prebuilt images are published to the GitHub Container Registry on every merge to
+`main`, so you can skip the local build:
+
+```bash
+docker run --rm --env-file .env ghcr.io/intinig/dr-peste-redux:latest
 ```
 
 The release build of `serenity` needs a few GB of RAM; if you build inside a small
