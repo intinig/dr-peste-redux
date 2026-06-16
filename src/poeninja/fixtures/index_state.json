@@ -1,0 +1,8 @@
+{
+  "economyLeagues": [
+    { "name": "Runes of Aldur", "url": "runesofaldur", "hardcore": false, "indexed": true },
+    { "name": "HC Runes of Aldur", "url": "runesofaldurhc", "hardcore": true, "indexed": true },
+    { "name": "Standard", "url": "standard", "hardcore": false, "indexed": true },
+    { "name": "Hardcore", "url": "hardcore", "hardcore": true, "indexed": true }
+  ]
+}
