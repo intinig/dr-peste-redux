@@ -1,0 +1,15 @@
+{
+  "core": { "primary": "divine", "secondary": "exalted", "rates": { "exalted": 186.7, "chaos": 11.27 } },
+  "lines": [
+    {
+      "id": 754,
+      "name": "The Dancing Dervish",
+      "baseType": "Scimitar",
+      "detailsId": "the-dancing-dervish-scimitar",
+      "icon": "https://web.poecdn.com/gen/image/dervish.png",
+      "primaryValue": 5822,
+      "listingCount": 2,
+      "sparkLine": { "totalChange": 16.02 }
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "core": { "primary": "divine", "secondary": "exalted", "rates": { "exalted": 184.7, "chaos": 11.01 } },
+  "lines": [
+    { "id": "divine", "primaryValue": 1, "volumePrimaryValue": 97385, "sparkline": { "totalChange": 74.02 } },
+    { "id": "exalted", "primaryValue": 0.005415, "volumePrimaryValue": 97385, "sparkline": { "totalChange": -42.65 } }
+  ],
+  "items": [
+    { "id": "divine", "name": "Divine Orb", "image": "/gen/image/divine.png", "detailsId": "divine-orb" },
+    { "id": "exalted", "name": "Exalted Orb", "image": "/gen/image/exalted.png", "detailsId": "exalted-orb" }
+  ]
+}
