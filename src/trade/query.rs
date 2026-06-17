@@ -7,6 +7,19 @@ use crate::itemtext::ParsedItem;
 use crate::trade::model::{MiscFilters, StatFilter, TradeQuery};
 use crate::trade::pseudo::PseudoMap;
 
+/// Band width as a fraction of the roll.
+const BAND_K: f64 = 0.5;
+/// Your roll sits at this percentile of the band (0.2 = bottom 20%).
+const BAND_PCTL: f64 = 0.2;
+
+/// Search band `[min, max]` around roll `v`, with `v` at the BAND_PCTL position.
+/// With BAND_K=0.5, BAND_PCTL=0.2 → `[0.9·v, 1.4·v]`.
+fn band(v: f64) -> (Option<f64>, Option<f64>) {
+    let lo = (v * (1.0 - BAND_PCTL * BAND_K)).round();
+    let hi = (v * (1.0 + (1.0 - BAND_PCTL) * BAND_K)).round();
+    (Some(lo), Some(hi))
+}
+
 pub fn build_baseline(item: &ParsedItem, pseudo: &PseudoMap, league: &str) -> TradeQuery {
     let all_stats: Vec<_> = item
         .implicits
@@ -58,11 +71,12 @@ pub fn build_baseline(item: &ParsedItem, pseudo: &PseudoMap, league: &str) -> Tr
             {
                 continue;
             }
+            let (min, max) = band(ps.total);
             stats.push(StatFilter {
                 id: ps.id.clone(),
                 label: ps.label.clone(),
-                min: Some(ps.total),
-                max: None,
+                min,
+                max,
             });
         }
     }
@@ -224,12 +238,14 @@ mod tests {
             .iter()
             .find(|s| s.id == "pseudo.pseudo_total_elemental_resistance")
             .unwrap();
-        assert_eq!(ele.min, Some(50.0));
+        assert_eq!(ele.min, Some(45.0)); // round(0.9 * 50) = 45
+        assert_eq!(ele.max, Some(70.0)); // round(1.4 * 50) = 70
         assert!(!q.stats.iter().any(|s| s.label.contains("Fire Resistance")));
         assert!(q
             .stats
             .iter()
-            .any(|s| s.id == "pseudo.pseudo_total_life" && s.min == Some(40.0)));
+            .any(|s| s.id == "pseudo.pseudo_total_life" && s.min == Some(36.0)));
+        // round(0.9 * 40) = 36
     }
 
     #[test]

@@ -57,6 +57,20 @@ pub async fn estimate<C: Comparables + ?Sized>(
     Ok(estimate_from(&listings))
 }
 
+/// Linear-interpolation percentile of an ascending-sorted slice. `p` in [0,1].
+fn percentile(sorted: &[f64], p: f64) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    if sorted.len() == 1 {
+        return sorted[0];
+    }
+    let rank = p * (sorted.len() - 1) as f64;
+    let lo = rank.floor() as usize;
+    let hi = rank.ceil() as usize;
+    sorted[lo] + (sorted[hi] - sorted[lo]) * (rank - lo as f64)
+}
+
 fn estimate_from(listings: &[Listing]) -> PriceEstimate {
     let mut prices: Vec<f64> = listings.iter().map(|l| l.price_divine).collect();
     prices.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
@@ -64,9 +78,9 @@ fn estimate_from(listings: &[Listing]) -> PriceEstimate {
     let (low, typical, high) = if n == 0 {
         (0.0, 0.0, 0.0)
     } else {
-        let low = prices[0];
-        let typical = prices[0];
-        let high = prices[(n * 3 / 4).min(n - 1)]; // ~75th percentile
+        let low = percentile(&prices, 0.10);
+        let typical = percentile(&prices, 0.25);
+        let high = percentile(&prices, 0.75);
         (low, typical, high)
     };
     PriceEstimate {
@@ -342,5 +356,12 @@ mod tests {
         // drop-both → 5 (delta 18). individual deltas sum 16+8=24. extra = 24-18 = 6.
         let syn = bd.synergy.unwrap();
         assert_eq!(syn.extra_divine, 6.0);
+    }
+
+    #[test]
+    fn percentile_interpolates_correctly() {
+        assert_eq!(super::percentile(&[10.0, 20.0, 30.0, 40.0], 0.25), 17.5);
+        assert_eq!(super::percentile(&[10.0], 0.5), 10.0);
+        assert_eq!(super::percentile(&[], 0.5), 0.0);
     }
 }

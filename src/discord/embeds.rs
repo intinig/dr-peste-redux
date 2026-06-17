@@ -84,15 +84,8 @@ pub fn farm_embed(title: &str, items: &[&PricedItem], league: &League) -> sereni
         )))
 }
 
-pub fn estimate_value_string(est: &PriceEstimate) -> String {
-    if est.listing_count == 0 {
-        return "No comparable listings".to_string();
-    }
-    if (est.high - est.low).abs() < f64::EPSILON {
-        format!("~{:.1} div", est.typical)
-    } else {
-        format!("{:.1}–{:.1} div", est.low, est.high)
-    }
+pub fn div_str(v: f64) -> String {
+    format!("{v:.1} div")
 }
 
 pub fn confidence_string(c: &Confidence) -> String {
@@ -117,23 +110,32 @@ pub fn estimate_embed(
         .base_type
         .clone()
         .unwrap_or_else(|| parsed.name.clone());
-    serenity::CreateEmbed::default()
+    let mut embed = serenity::CreateEmbed::default()
         .title(title)
-        .description(format!("**{}**", parsed.name))
-        .field("Estimated value", estimate_value_string(est), true)
-        .field(
-            "Confidence",
-            format!(
-                "{} ({} listings)",
-                confidence_string(&est.confidence),
-                est.listing_count
-            ),
-            true,
-        )
-        .footer(serenity::CreateEmbedFooter::new(format!(
-            "live trade • {} • not affiliated with GGG",
-            league.name
-        )))
+        .description(format!("**{}**", parsed.name));
+
+    if est.listing_count == 0 {
+        embed = embed.field("Estimated value", "No comparable listings found", false);
+    } else {
+        embed = embed
+            .field("Quick sale", div_str(est.low), true)
+            .field("Fair", div_str(est.typical), true)
+            .field("Patient", div_str(est.high), true)
+            .field(
+                "Confidence",
+                format!(
+                    "{} ({} listings)",
+                    confidence_string(&est.confidence),
+                    est.listing_count
+                ),
+                false,
+            );
+    }
+
+    embed.footer(serenity::CreateEmbedFooter::new(format!(
+        "live trade • {} • not affiliated with GGG",
+        league.name
+    )))
 }
 
 pub fn breakdown_embed(
@@ -211,21 +213,16 @@ mod tests {
         );
     }
 
-    use crate::trade::model::{AblationKind, Confidence, Contribution, PriceEstimate};
+    use crate::trade::model::{AblationKind, Confidence, Contribution};
 
     #[test]
-    fn estimate_value_string_formats_range_and_confidence() {
-        let est = PriceEstimate {
-            low: 8.0,
-            typical: 8.0,
-            high: 15.0,
-            listing_count: 12,
-            confidence: Confidence::High,
-        };
-        let s = estimate_value_string(&est);
-        assert!(s.contains("8"));
-        assert!(s.contains("15"));
-        assert_eq!(confidence_string(&est.confidence), "High");
+    fn div_str_formats_one_decimal() {
+        assert_eq!(div_str(8.0), "8.0 div");
+    }
+
+    #[test]
+    fn confidence_string_high() {
+        assert_eq!(confidence_string(&Confidence::High), "High");
     }
 
     #[test]
