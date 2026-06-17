@@ -85,7 +85,12 @@ pub fn farm_embed(title: &str, items: &[&PricedItem], league: &League) -> sereni
 }
 
 pub fn div_str(v: f64) -> String {
-    format!("{v:.1} div")
+    // Finer precision below 1 div so cheap items don't render as "0.0 div".
+    if v >= 1.0 {
+        format!("{v:.1} div")
+    } else {
+        format!("{v:.2} div")
+    }
 }
 
 pub fn confidence_string(c: &Confidence) -> String {
@@ -218,6 +223,9 @@ mod tests {
     #[test]
     fn div_str_formats_one_decimal() {
         assert_eq!(div_str(8.0), "8.0 div");
+        assert_eq!(div_str(1.0), "1.0 div");
+        // sub-1-div values get finer precision so cheap items aren't "0.0 div"
+        assert_eq!(div_str(0.04), "0.04 div");
     }
 
     #[test]

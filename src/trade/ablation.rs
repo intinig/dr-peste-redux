@@ -179,8 +179,13 @@ pub async fn breakdown<C: Comparables + ?Sized>(
 
 /// Human-clickable trade2 search URL for the item's league (a fresh search; the
 /// API search id is ephemeral, so we link to the site search page instead).
+/// The league is URL-encoded — PoE league names contain spaces (e.g. "Runes of
+/// Aldur"), and an unencoded space makes Discord reject the embed `url`.
 pub fn trade_url(query: &TradeQuery) -> String {
-    format!("https://www.pathofexile.com/trade2/search/{}", query.league)
+    format!(
+        "https://www.pathofexile.com/trade2/search/{}",
+        query.league.replace(' ', "%20")
+    )
 }
 
 #[cfg(test)]
@@ -369,5 +374,22 @@ mod tests {
         assert_eq!(super::percentile(&[10.0, 20.0, 30.0, 40.0], 0.25), 17.5);
         assert_eq!(super::percentile(&[10.0], 0.5), 10.0);
         assert_eq!(super::percentile(&[], 0.5), 0.0);
+    }
+
+    #[test]
+    fn trade_url_encodes_league_spaces() {
+        let q = TradeQuery {
+            league: "Runes of Aldur".into(),
+            category: None,
+            type_line: None,
+            stats: vec![],
+            misc: MiscFilters::default(),
+        };
+        let url = trade_url(&q);
+        assert!(
+            !url.contains(' '),
+            "url must not contain a raw space: {url}"
+        );
+        assert!(url.ends_with("/Runes%20of%20Aldur"));
     }
 }
