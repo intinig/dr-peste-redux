@@ -16,6 +16,8 @@ Read it before making architectural changes.
 - `/price item:<autocomplete>` — look up an item's value by name.
 - `/paste` — opens a modal; user pastes a copied in-game item, bot parses
   and matches it.
+  Rare/magic items are priced live via the official PoE2 `trade2` API (ablation
+  pricing); other items use the poe.ninja snapshot.
 - `/help` — lists the available commands (ephemeral embed).
 - `/farm [category] [sort:value|trending]` — most valuable / biggest movers.
 
@@ -81,6 +83,8 @@ Set via environment (or a local `.env`, loaded by `dotenvy`):
 - `GUILD_ID` — guild for instant slash-command registration.
 - `POLL_INTERVAL_MINS` — refresh interval (default 30).
 - `MIN_VOLUME` — liquidity threshold for `/farm`.
+- `POE_SESSID` — optional PoE session cookie to raise trade rate limits.
+  **Secret.** Anonymous reads work without it (tighter limits).
 
 Keep a committed `.env.example` documenting the keys with placeholder values.
 
@@ -92,6 +96,8 @@ Keep a committed `.env.example` documenting the keys with placeholder values.
 - Errors: `anyhow` throughout; log with `tracing`. The refresher must never
   panic the process on a fetch/parse error.
 - Tests are offline by default; anything hitting the network is `#[ignore]`d.
+- `src/trade/data/pseudo_map.json` is a maintained artifact — re-check the
+  stat→pseudo mappings against `trade2/data/stats` after each major PoE2 patch.
 
 ## Hard rules
 
