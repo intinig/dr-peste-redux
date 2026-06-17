@@ -32,7 +32,11 @@ pub async fn gather_comparables<A: TradeApi + ?Sized>(
         let resp = api.search(&q).await?;
         let take = resp.hashes.len().min(limit);
         let mut listings = api.fetch(&resp.id, &resp.hashes[..take]).await?;
-        listings.sort_by(|a, b| a.price_divine.partial_cmp(&b.price_divine).unwrap_or(std::cmp::Ordering::Equal));
+        listings.sort_by(|a, b| {
+            a.price_divine
+                .partial_cmp(&b.price_divine)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         if listings.len() >= limit || relaxations >= max_relax || q.stats.is_empty() {
             return Ok(listings);
         }
@@ -163,7 +167,13 @@ mod tests {
     use std::sync::Mutex;
 
     fn listing(divine: f64) -> Listing {
-        Listing { price: Money { amount: divine, currency: Currency::Divine }, price_divine: divine }
+        Listing {
+            price: Money {
+                amount: divine,
+                currency: Currency::Divine,
+            },
+            price_divine: divine,
+        }
     }
 
     /// Fake low-level API: returns listings whose count/prices depend on how
@@ -179,10 +189,18 @@ mod tests {
             self.seen.lock().unwrap().push(q.clone());
             let n = 1 + (3usize.saturating_sub(q.stats.len())) * 4;
             let hashes = (0..n).map(|i| format!("h{i}")).collect::<Vec<_>>();
-            Ok(SearchResponse { id: "qid".into(), total: n as u64, hashes })
+            Ok(SearchResponse {
+                id: "qid".into(),
+                total: n as u64,
+                hashes,
+            })
         }
         async fn fetch(&self, _id: &str, hashes: &[String]) -> anyhow::Result<Vec<Listing>> {
-            Ok(hashes.iter().enumerate().map(|(i, _)| listing(10.0 + i as f64)).collect())
+            Ok(hashes
+                .iter()
+                .enumerate()
+                .map(|(i, _)| listing(10.0 + i as f64))
+                .collect())
         }
     }
 
@@ -192,7 +210,12 @@ mod tests {
             category: None,
             type_line: Some("Sapphire Ring".into()),
             stats: (0..n_stats)
-                .map(|i| StatFilter { id: format!("s{i}"), label: format!("s{i}"), min: Some(10.0), max: None })
+                .map(|i| StatFilter {
+                    id: format!("s{i}"),
+                    label: format!("s{i}"),
+                    min: Some(10.0),
+                    max: None,
+                })
                 .collect(),
             misc: MiscFilters::default(),
         }
@@ -200,7 +223,9 @@ mod tests {
 
     #[tokio::test]
     async fn relaxes_until_min_listings_reached() {
-        let api = FakeApi { seen: Mutex::new(vec![]) };
+        let api = FakeApi {
+            seen: Mutex::new(vec![]),
+        };
         // 3 stats → 1 listing (< k=5). Must relax (drop a stat) until ≥ 5.
         let got = gather_comparables(&api, &q_with(3), 5, 3).await.unwrap();
         assert!(got.len() >= 5);
@@ -217,9 +242,15 @@ mod tests {
             let has_spell = q.stats.iter().any(|s| s.id.contains("spell"));
             let has_crit = q.stats.iter().any(|s| s.id.contains("crit"));
             let mut price = 5.0;
-            if has_spell { price += 10.0; }
-            if has_crit { price += 2.0; }
-            if has_spell && has_crit { price += 6.0; }
+            if has_spell {
+                price += 10.0;
+            }
+            if has_crit {
+                price += 2.0;
+            }
+            if has_spell && has_crit {
+                price += 6.0;
+            }
             Ok(vec![listing(price); 12]) // 12 listings → High confidence
         }
     }
@@ -230,8 +261,18 @@ mod tests {
             category: None,
             type_line: Some("Expert Crackling Staff".into()),
             stats: vec![
-                StatFilter { id: "explicit.spell".into(), label: "+to all Spell Skills".into(), min: Some(7.0), max: None },
-                StatFilter { id: "explicit.crit".into(), label: "Critical Chance".into(), min: Some(80.0), max: None },
+                StatFilter {
+                    id: "explicit.spell".into(),
+                    label: "+to all Spell Skills".into(),
+                    min: Some(7.0),
+                    max: None,
+                },
+                StatFilter {
+                    id: "explicit.crit".into(),
+                    label: "Critical Chance".into(),
+                    min: Some(80.0),
+                    max: None,
+                },
             ],
             misc: MiscFilters::default(),
         }
@@ -248,7 +289,9 @@ mod tests {
 
     #[tokio::test]
     async fn breakdown_ranks_contributions_and_flags_synergy() {
-        let bd = breakdown(&FakePricer, &two_stat_query(), 10, 2).await.unwrap();
+        let bd = breakdown(&FakePricer, &two_stat_query(), 10, 2)
+            .await
+            .unwrap();
         // baseline 23; drop spell → 5+2 = 7 (delta 16); drop crit → 5+10 = 15 (delta 8)
         assert_eq!(bd.ranked[0].characteristic, "+to all Spell Skills");
         assert_eq!(bd.ranked[0].delta_divine, 16.0);

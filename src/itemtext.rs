@@ -75,8 +75,17 @@ fn labeled_u32(lines: &[&str], label: &str) -> Option<u32> {
 /// True for lines that are headers/properties/requirements rather than mods.
 fn is_meta_line(l: &str) -> bool {
     const PREFIXES: [&str; 11] = [
-        "Item Class:", "Rarity:", "Requirements:", "Level:", "Item Level:",
-        "Quality:", "Sockets:", "Stack Size:", "Str", "Dex", "Int", // attribute reqs
+        "Item Class:",
+        "Rarity:",
+        "Requirements:",
+        "Level:",
+        "Item Level:",
+        "Quality:",
+        "Sockets:",
+        "Stack Size:",
+        "Str",
+        "Dex",
+        "Int", // attribute reqs
     ];
     l.is_empty()
         || is_separator(l)
@@ -88,7 +97,14 @@ fn is_meta_line(l: &str) -> bool {
 /// Strips a trailing parenthetical tag like " (implicit)" and returns
 /// (clean_text, tag). Tag is lowercased; None if no recognized tag.
 fn split_tag(l: &str) -> (String, Option<String>) {
-    const KNOWN_TAGS: [&str; 6] = ["implicit", "enchant", "rune", "crafted", "fractured", "augmented"];
+    const KNOWN_TAGS: [&str; 6] = [
+        "implicit",
+        "enchant",
+        "rune",
+        "crafted",
+        "fractured",
+        "augmented",
+    ];
     if let Some(open) = l.rfind('(') {
         if l.ends_with(')') {
             let tag = l[open + 1..l.len() - 1].to_lowercase();
@@ -223,8 +239,14 @@ mod tests {
     #[test]
     fn excludes_attribute_reqs_and_keeps_untagged_parentheses() {
         let p = parse(REQS_AND_PARENS).unwrap();
-        assert!(p.explicits.iter().all(|s| !s.raw.starts_with("Str") && !s.raw.starts_with("Dex") && !s.raw.starts_with("Int")));
-        let spell = p.explicits.iter().find(|s| s.raw.contains("Spell Damage")).unwrap();
+        assert!(p.explicits.iter().all(|s| !s.raw.starts_with("Str")
+            && !s.raw.starts_with("Dex")
+            && !s.raw.starts_with("Int")));
+        let spell = p
+            .explicits
+            .iter()
+            .find(|s| s.raw.contains("Spell Damage"))
+            .unwrap();
         assert!(spell.raw.ends_with(')'));
         assert_eq!(spell.value, Some(25.0));
     }
@@ -238,7 +260,11 @@ mod tests {
         assert_eq!(p.runes[0].value, Some(12.0));
         // life + 2 resists, rune line excluded, implicit excluded
         assert_eq!(p.explicits.len(), 3);
-        let fire = p.explicits.iter().find(|s| s.raw.contains("Fire Resistance")).unwrap();
+        let fire = p
+            .explicits
+            .iter()
+            .find(|s| s.raw.contains("Fire Resistance"))
+            .unwrap();
         assert_eq!(fire.value, Some(32.0));
     }
 

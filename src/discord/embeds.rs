@@ -108,15 +108,26 @@ pub fn contribution_line(c: &Contribution) -> String {
     format!("• {} — ~{:.1} div", c.characteristic, c.delta_divine)
 }
 
-pub fn estimate_embed(parsed: &ParsedItem, est: &PriceEstimate, league: &League) -> serenity::CreateEmbed {
-    let title = parsed.base_type.clone().unwrap_or_else(|| parsed.name.clone());
+pub fn estimate_embed(
+    parsed: &ParsedItem,
+    est: &PriceEstimate,
+    league: &League,
+) -> serenity::CreateEmbed {
+    let title = parsed
+        .base_type
+        .clone()
+        .unwrap_or_else(|| parsed.name.clone());
     serenity::CreateEmbed::default()
         .title(title)
         .description(format!("**{}**", parsed.name))
         .field("Estimated value", estimate_value_string(est), true)
         .field(
             "Confidence",
-            format!("{} ({} listings)", confidence_string(&est.confidence), est.listing_count),
+            format!(
+                "{} ({} listings)",
+                confidence_string(&est.confidence),
+                est.listing_count
+            ),
             true,
         )
         .footer(serenity::CreateEmbedFooter::new(format!(
@@ -125,7 +136,11 @@ pub fn estimate_embed(parsed: &ParsedItem, est: &PriceEstimate, league: &League)
         )))
 }
 
-pub fn breakdown_embed(parsed: &ParsedItem, bd: &Breakdown, league: &League) -> serenity::CreateEmbed {
+pub fn breakdown_embed(
+    parsed: &ParsedItem,
+    bd: &Breakdown,
+    league: &League,
+) -> serenity::CreateEmbed {
     let mut lines: Vec<String> = bd.ranked.iter().map(contribution_line).collect();
     if let Some(syn) = &bd.synergy {
         lines.push(format!(

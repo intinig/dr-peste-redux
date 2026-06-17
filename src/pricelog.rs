@@ -17,7 +17,10 @@ pub struct ProbeLog {
 
 impl ProbeLog {
     pub fn new(path: impl AsRef<Path>) -> Self {
-        ProbeLog { path: path.as_ref().to_path_buf(), lock: Mutex::new(()) }
+        ProbeLog {
+            path: path.as_ref().to_path_buf(),
+            lock: Mutex::new(()),
+        }
     }
 
     /// Appends one probe as a JSON line. Errors are returned, never panicked, so
@@ -25,7 +28,10 @@ impl ProbeLog {
     pub fn append(&self, probe: &Probe) -> Result<()> {
         let line = serde_json::to_string(probe)?;
         let _guard = self.lock.lock().unwrap();
-        let mut f = OpenOptions::new().create(true).append(true).open(&self.path)?;
+        let mut f = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?;
         writeln!(f, "{line}")?;
         Ok(())
     }

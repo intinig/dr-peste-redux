@@ -1,9 +1,9 @@
 use std::time::Duration;
 
 use super::{embeds, AppContext, Context, Error};
+use crate::itemtext;
 use crate::poeninja::League;
 use crate::store::{self, MatchOutcome};
-use crate::itemtext;
 
 #[derive(Debug, poise::Modal)]
 #[name = "Paste an item"]
@@ -76,7 +76,8 @@ async fn price_rare(
         Ok(e) => e,
         Err(e) => {
             tracing::warn!(error = %e, "trade price failed");
-            ctx.say("Couldn't reach trade right now — try again shortly.").await?;
+            ctx.say("Couldn't reach trade right now — try again shortly.")
+                .await?;
             return Ok(());
         }
     };
@@ -95,13 +96,12 @@ async fn price_rare(
         .await?;
 
     let msg = reply.message().await?;
-    let interaction = serenity::ComponentInteractionCollector::new(
-        ctx.serenity_context().shard.clone(),
-    )
-    .message_id(msg.id)
-    .custom_ids(vec!["drp_breakdown".to_string()])
-    .timeout(Duration::from_secs(120))
-    .await;
+    let interaction =
+        serenity::ComponentInteractionCollector::new(ctx.serenity_context().shard.clone())
+            .message_id(msg.id)
+            .custom_ids(vec!["drp_breakdown".to_string()])
+            .timeout(Duration::from_secs(120))
+            .await;
 
     match interaction {
         Some(mci) => {
@@ -126,16 +126,22 @@ async fn price_rare(
                 }
             }
             reply
-                .edit(*ctx, poise::CreateReply::default()
-                    .embed(embeds::estimate_embed(parsed, &est, league))
-                    .components(vec![]))
+                .edit(
+                    *ctx,
+                    poise::CreateReply::default()
+                        .embed(embeds::estimate_embed(parsed, &est, league))
+                        .components(vec![]),
+                )
                 .await?;
         }
         None => {
             reply
-                .edit(*ctx, poise::CreateReply::default()
-                    .embed(embeds::estimate_embed(parsed, &est, league))
-                    .components(vec![]))
+                .edit(
+                    *ctx,
+                    poise::CreateReply::default()
+                        .embed(embeds::estimate_embed(parsed, &est, league))
+                        .components(vec![]),
+                )
                 .await?;
         }
     }

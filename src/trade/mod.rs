@@ -29,7 +29,11 @@ pub struct TradePricer<C: Comparables> {
 
 impl<C: Comparables> TradePricer<C> {
     pub fn new(comparables: C, pseudo: PseudoMap, log: ProbeLog) -> Self {
-        TradePricer { comparables, pseudo, log }
+        TradePricer {
+            comparables,
+            pseudo,
+            log,
+        }
     }
 
     pub async fn price(&self, item: &ParsedItem, league: &str) -> Result<PriceEstimate> {
@@ -41,7 +45,8 @@ impl<C: Comparables> TradePricer<C> {
 
     pub async fn breakdown(&self, item: &ParsedItem, league: &str) -> Result<Breakdown> {
         let query = build_baseline(item, &self.pseudo, league);
-        let bd = crate::trade::ablation::breakdown(&self.comparables, &query, LISTING_LIMIT, TOP_K).await?;
+        let bd = crate::trade::ablation::breakdown(&self.comparables, &query, LISTING_LIMIT, TOP_K)
+            .await?;
         self.record(&query, &bd.baseline);
         Ok(bd)
     }
@@ -70,16 +75,35 @@ mod tests {
     #[async_trait]
     impl Comparables for Flat {
         async fn comparables(&self, _q: &TradeQuery, _l: usize) -> anyhow::Result<Vec<Listing>> {
-            Ok(vec![Listing { price: Money { amount: self.0, currency: Currency::Divine }, price_divine: self.0 }; 8])
+            Ok(vec![
+                Listing {
+                    price: Money {
+                        amount: self.0,
+                        currency: Currency::Divine
+                    },
+                    price_divine: self.0
+                };
+                8
+            ])
         }
     }
 
     fn ring() -> ParsedItem {
         ParsedItem {
-            rarity: Rarity::Rare, name: "Woe Coil".into(), base_type: Some("Sapphire Ring".into()),
-            item_class: Some("Rings".into()), item_level: Some(80), quality: None, corrupted: false,
-            implicits: vec![], enchants: vec![], runes: vec![],
-            explicits: vec![ItemStat { raw: "+40 to maximum Life".into(), value: Some(40.0) }],
+            rarity: Rarity::Rare,
+            name: "Woe Coil".into(),
+            base_type: Some("Sapphire Ring".into()),
+            item_class: Some("Rings".into()),
+            item_level: Some(80),
+            quality: None,
+            corrupted: false,
+            implicits: vec![],
+            enchants: vec![],
+            runes: vec![],
+            explicits: vec![ItemStat {
+                raw: "+40 to maximum Life".into(),
+                value: Some(40.0),
+            }],
         }
     }
 

@@ -90,7 +90,11 @@ async fn main() -> Result<()> {
                 poise::builtins::register_in_guild(ctx, &framework.options().commands, guild_id)
                     .await?;
                 tracing::info!("commands registered; bot ready");
-                Ok(Data { store, config, pricer })
+                Ok(Data {
+                    store,
+                    config,
+                    pricer,
+                })
             })
         })
         .build();

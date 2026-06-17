@@ -120,13 +120,15 @@ mod tests {
             "GUILD_ID" => Some("1".into()),
             "POE_SESSID" => Some("abc".into()),
             _ => None,
-        }).unwrap();
+        })
+        .unwrap();
         assert_eq!(cfg.poe_sessid.as_deref(), Some("abc"));
         let cfg2 = Config::from_lookup(|k| match k {
             "DISCORD_TOKEN" => Some("t".into()),
             "GUILD_ID" => Some("1".into()),
             _ => None,
-        }).unwrap();
+        })
+        .unwrap();
         assert_eq!(cfg2.poe_sessid, None);
     }
 }

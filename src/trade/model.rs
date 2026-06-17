@@ -91,7 +91,6 @@ pub struct PriceEstimate {
 #[derive(Clone, Debug, PartialEq)]
 pub enum AblationKind {
     Drop,
-    Relax,
 }
 
 #[derive(Clone, Debug, PartialEq)]

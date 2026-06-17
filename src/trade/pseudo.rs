@@ -30,9 +30,8 @@ impl PseudoMap {
     /// Loads the committed seed map. Panics only on a malformed committed file
     /// (a build-time bug, caught by tests), never at runtime on user input.
     pub fn load() -> Self {
-        let rules: Vec<PseudoRule> =
-            serde_json::from_str(include_str!("data/pseudo_map.json"))
-                .expect("pseudo_map.json is valid");
+        let rules: Vec<PseudoRule> = serde_json::from_str(include_str!("data/pseudo_map.json"))
+            .expect("pseudo_map.json is valid");
         PseudoMap { rules }
     }
 
@@ -67,7 +66,10 @@ mod tests {
     use crate::itemtext::ItemStat;
 
     fn stat(raw: &str, v: f64) -> ItemStat {
-        ItemStat { raw: raw.to_string(), value: Some(v) }
+        ItemStat {
+            raw: raw.to_string(),
+            value: Some(v),
+        }
     }
 
     #[test]
@@ -79,9 +81,15 @@ mod tests {
             stat("+40 to maximum Life", 40.0),
         ];
         let resolved = map.resolve(&stats);
-        let ele = resolved.iter().find(|p| p.id == "pseudo.pseudo_total_elemental_resistance").unwrap();
+        let ele = resolved
+            .iter()
+            .find(|p| p.id == "pseudo.pseudo_total_elemental_resistance")
+            .unwrap();
         assert_eq!(ele.total, 50.0);
-        let life = resolved.iter().find(|p| p.id == "pseudo.pseudo_total_life").unwrap();
+        let life = resolved
+            .iter()
+            .find(|p| p.id == "pseudo.pseudo_total_life")
+            .unwrap();
         assert_eq!(life.total, 40.0);
     }
 
@@ -90,6 +98,8 @@ mod tests {
         let map = PseudoMap::load();
         let resolved = map.resolve(&[stat("+10 to Strength", 10.0)]);
         assert!(resolved.iter().all(|p| p.id != "pseudo.pseudo_total_life"));
-        assert!(resolved.iter().any(|p| p.id == "pseudo.pseudo_total_attributes"));
+        assert!(resolved
+            .iter()
+            .any(|p| p.id == "pseudo.pseudo_total_attributes"));
     }
 }

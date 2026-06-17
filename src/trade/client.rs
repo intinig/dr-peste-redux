@@ -23,7 +23,10 @@ pub struct CurrencyRates {
 
 impl Default for CurrencyRates {
     fn default() -> Self {
-        CurrencyRates { exalted_per_divine: 180.0, chaos_per_divine: 2000.0 }
+        CurrencyRates {
+            exalted_per_divine: 180.0,
+            chaos_per_divine: 2000.0,
+        }
     }
 }
 
@@ -60,16 +63,6 @@ pub fn parse_rate_rules(header_value: &str) -> Vec<RateRule> {
         .collect()
 }
 
-/// Seconds to wait given the strictest rule and current hit count. 0 under limit.
-pub fn backoff_secs(rules: &[RateRule], current_hits: u32) -> u64 {
-    rules
-        .iter()
-        .filter(|r| current_hits >= r.max)
-        .map(|r| r.period as u64)
-        .max()
-        .unwrap_or(0)
-}
-
 /// Seconds to wait after a 429: the standard `Retry-After` header if present,
 /// else the largest period from the rate-limit rule headers, clamped to [1,120].
 pub fn retry_after_secs(headers: &reqwest::header::HeaderMap) -> u64 {
@@ -84,7 +77,12 @@ pub fn retry_after_secs(headers: &reqwest::header::HeaderMap) -> u64 {
         if let Some(period) = headers
             .get(name)
             .and_then(|h| h.to_str().ok())
-            .and_then(|v| parse_rate_rules(v).into_iter().map(|r| r.period as u64).max())
+            .and_then(|v| {
+                parse_rate_rules(v)
+                    .into_iter()
+                    .map(|r| r.period as u64)
+                    .max()
+            })
         {
             return period.clamp(1, 120);
         }
@@ -114,7 +112,10 @@ impl TradeClient {
             headers.insert(header::COOKIE, header::HeaderValue::from_str(&cookie)?);
             builder = builder.default_headers(headers);
         }
-        Ok(Self { http: builder.build()?, rates: CurrencyRates::default() })
+        Ok(Self {
+            http: builder.build()?,
+            rates: CurrencyRates::default(),
+        })
     }
 
     fn parse_currency(s: &str) -> Currency {
@@ -139,7 +140,10 @@ impl TradeClient {
                         let currency = Self::parse_currency(price.get("currency")?.as_str()?);
                         let money = Money { amount, currency };
                         let price_divine = self.rates.to_divine(&money);
-                        Some(Listing { price: money, price_divine })
+                        Some(Listing {
+                            price: money,
+                            price_divine,
+                        })
                     })
                     .collect()
             })
@@ -177,12 +181,20 @@ impl TradeApi for TradeClient {
             .await
             .context("trade2 search failed")?;
         let v: Value = resp.json().await?;
-        let id = v.get("id").and_then(|x| x.as_str()).unwrap_or_default().to_string();
+        let id = v
+            .get("id")
+            .and_then(|x| x.as_str())
+            .unwrap_or_default()
+            .to_string();
         let total = v.get("total").and_then(|x| x.as_u64()).unwrap_or(0);
         let hashes = v
             .get("result")
             .and_then(|x| x.as_array())
-            .map(|a| a.iter().filter_map(|h| h.as_str().map(String::from)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|h| h.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
         Ok(SearchResponse { id, total, hashes })
     }
@@ -221,14 +233,21 @@ mod tests {
     #[test]
     fn parses_rate_limit_rule_triples() {
         let rules = parse_rate_rules("5:10:60,15:60:120");
-        assert_eq!(rules, vec![RateRule { max: 5, period: 10, restriction: 60 }, RateRule { max: 15, period: 60, restriction: 120 }]);
-    }
-
-    #[test]
-    fn backoff_is_zero_when_under_limit_and_period_when_at_limit() {
-        let rule = RateRule { max: 5, period: 10, restriction: 60 };
-        assert_eq!(backoff_secs(&[rule.clone()], 3), 0);
-        assert_eq!(backoff_secs(&[rule], 5), 10);
+        assert_eq!(
+            rules,
+            vec![
+                RateRule {
+                    max: 5,
+                    period: 10,
+                    restriction: 60
+                },
+                RateRule {
+                    max: 15,
+                    period: 60,
+                    restriction: 120
+                }
+            ]
+        );
     }
 
     #[test]
@@ -259,7 +278,10 @@ mod tests {
         };
         let resp = client.search(&q).await.unwrap();
         assert!(resp.total > 0);
-        let listings = client.fetch(&resp.id, &resp.hashes[..resp.hashes.len().min(5)]).await.unwrap();
+        let listings = client
+            .fetch(&resp.id, &resp.hashes[..resp.hashes.len().min(5)])
+            .await
+            .unwrap();
         assert!(!listings.is_empty());
         assert!(listings.iter().all(|l| l.price_divine >= 0.0));
     }

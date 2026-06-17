@@ -7,14 +7,6 @@ use crate::itemtext::ParsedItem;
 use crate::trade::model::{MiscFilters, StatFilter, TradeQuery};
 use crate::trade::pseudo::PseudoMap;
 
-/// Pseudo ids that represent fungible groups whose individual lines we suppress
-/// in favor of the aggregate.
-const FUNGIBLE_PSEUDOS: [&str; 3] = [
-    "pseudo.pseudo_total_elemental_resistance",
-    "pseudo.pseudo_total_life",
-    "pseudo.pseudo_total_attributes",
-];
-
 pub fn build_baseline(item: &ParsedItem, pseudo: &PseudoMap, league: &str) -> TradeQuery {
     let all_stats: Vec<_> = item
         .implicits
@@ -50,12 +42,6 @@ pub fn build_baseline(item: &ParsedItem, pseudo: &PseudoMap, league: &str) -> Tr
             corrupted: Some(item.corrupted),
         },
     }
-}
-
-/// True if a pseudo id is one of the fungible aggregates (kept for callers that
-/// want to drill from aggregate to constituent in the breakdown).
-pub fn is_fungible(pseudo_id: &str) -> bool {
-    FUNGIBLE_PSEUDOS.contains(&pseudo_id)
 }
 
 /// Serializes a `TradeQuery` to the trade2 search request body.
@@ -128,9 +114,18 @@ mod tests {
             enchants: vec![],
             runes: vec![],
             explicits: vec![
-                ItemStat { raw: "+40 to maximum Life".into(), value: Some(40.0) },
-                ItemStat { raw: "+32% to Fire Resistance".into(), value: Some(32.0) },
-                ItemStat { raw: "+18% to Lightning Resistance".into(), value: Some(18.0) },
+                ItemStat {
+                    raw: "+40 to maximum Life".into(),
+                    value: Some(40.0),
+                },
+                ItemStat {
+                    raw: "+32% to Fire Resistance".into(),
+                    value: Some(32.0),
+                },
+                ItemStat {
+                    raw: "+18% to Lightning Resistance".into(),
+                    value: Some(18.0),
+                },
             ],
         }
     }
@@ -140,10 +135,17 @@ mod tests {
         let q = build_baseline(&ring(), &PseudoMap::load(), "Standard");
         assert_eq!(q.league, "Standard");
         assert_eq!(q.type_line.as_deref(), Some("Sapphire Ring"));
-        let ele = q.stats.iter().find(|s| s.id == "pseudo.pseudo_total_elemental_resistance").unwrap();
+        let ele = q
+            .stats
+            .iter()
+            .find(|s| s.id == "pseudo.pseudo_total_elemental_resistance")
+            .unwrap();
         assert_eq!(ele.min, Some(50.0));
         assert!(!q.stats.iter().any(|s| s.label.contains("Fire Resistance")));
-        assert!(q.stats.iter().any(|s| s.id == "pseudo.pseudo_total_life" && s.min == Some(40.0)));
+        assert!(q
+            .stats
+            .iter()
+            .any(|s| s.id == "pseudo.pseudo_total_life" && s.min == Some(40.0)));
     }
 
     #[test]
