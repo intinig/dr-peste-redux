@@ -161,6 +161,19 @@ impl TradeClient {
             return Ok(resp.error_for_status()?);
         }
     }
+
+    /// Fetches the raw `data/stats` catalog JSON.
+    // wired in T1.5-4/T1.5-6
+    #[allow(dead_code)]
+    pub async fn fetch_stats_raw(&self) -> Result<String> {
+        let url = format!("{TRADE_BASE}/data/stats");
+        Ok(self
+            .send_with_retry(|| self.http.get(&url))
+            .await
+            .context("trade2 data/stats failed")?
+            .text()
+            .await?)
+    }
 }
 
 #[async_trait]
