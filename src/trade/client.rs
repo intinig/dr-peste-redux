@@ -257,9 +257,10 @@ impl crate::trade::ablation::Comparables for TradeClient {
         // --- await (no mutex held) ---
         let result = crate::trade::ablation::gather_comparables(self, query, limit, 3).await?;
 
-        // --- lock, insert, unlock ---
+        // --- lock, prune expired, insert, unlock ---
         {
             let mut guard = self.cache.lock().unwrap();
+            guard.retain(|_, (ts, _)| ts.elapsed() < Duration::from_secs(60));
             guard.insert(key, (Instant::now(), result.clone()));
         }
 

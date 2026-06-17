@@ -7,11 +7,23 @@ use serde::Deserialize;
 use crate::itemtext::ItemStat;
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct PseudoPattern {
+    pub text: String,
+    #[serde(default = "default_weight")]
+    pub weight: f64,
+}
+
+fn default_weight() -> f64 {
+    1.0
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct PseudoRule {
     pub pseudo_id: String,
     pub label: String,
-    /// Substrings; a stat line matching any contributes its value to the sum.
-    pub patterns: Vec<String>,
+    /// Substrings; a stat line matching the first pattern found contributes
+    /// its value × that pattern's weight to the sum.
+    pub patterns: Vec<PseudoPattern>,
 }
 
 #[derive(Debug, Clone)]
@@ -35,16 +47,22 @@ impl PseudoMap {
         PseudoMap { rules }
     }
 
-    /// Sums each pseudo over all stat lines that match its patterns. Pseudos
-    /// with no matching lines (total == 0.0) are omitted from the result.
+    /// Sums each pseudo over all stat lines that match its patterns.  For each
+    /// stat line the FIRST matching pattern's weight is used to scale the
+    /// contribution (`value * weight`).  Pseudos with no matching lines
+    /// (total == 0.0) are omitted from the result.
     pub fn resolve(&self, stats: &[ItemStat]) -> Vec<PseudoStat> {
         self.rules
             .iter()
             .filter_map(|rule| {
                 let total: f64 = stats
                     .iter()
-                    .filter(|s| rule.patterns.iter().any(|p| s.raw.contains(p.as_str())))
-                    .filter_map(|s| s.value)
+                    .filter_map(|s| {
+                        rule.patterns
+                            .iter()
+                            .find(|p| s.raw.contains(p.text.as_str()))
+                            .and_then(|p| s.value.map(|v| v * p.weight))
+                    })
                     .sum();
                 if total > 0.0 {
                     Some(PseudoStat {
@@ -65,7 +83,7 @@ impl PseudoMap {
     pub fn covers(&self, raw: &str) -> bool {
         self.rules
             .iter()
-            .any(|r| r.patterns.iter().any(|p| raw.contains(p.as_str())))
+            .any(|r| r.patterns.iter().any(|p| raw.contains(p.text.as_str())))
     }
 }
 
@@ -110,5 +128,33 @@ mod tests {
         assert!(resolved
             .iter()
             .any(|p| p.id == "pseudo.pseudo_total_attributes"));
+    }
+
+    #[test]
+    fn dual_resist_pattern_counts_double() {
+        let map = PseudoMap::load();
+        // "+20% to Fire and Lightning Resistance" should contribute 40 to total
+        // elemental resistance (weight 2 × value 20).
+        let stats = vec![stat("+20% to Fire and Lightning Resistance", 20.0)];
+        let resolved = map.resolve(&stats);
+        let ele = resolved
+            .iter()
+            .find(|p| p.id == "pseudo.pseudo_total_elemental_resistance")
+            .unwrap();
+        assert_eq!(ele.total, 40.0);
+    }
+
+    #[test]
+    fn all_attributes_pattern_counts_triple() {
+        let map = PseudoMap::load();
+        // "+10 to all Attributes" should contribute 30 to total attributes
+        // (weight 3 × value 10).
+        let stats = vec![stat("+10 to all Attributes", 10.0)];
+        let resolved = map.resolve(&stats);
+        let attrs = resolved
+            .iter()
+            .find(|p| p.id == "pseudo.pseudo_total_attributes")
+            .unwrap();
+        assert_eq!(attrs.total, 30.0);
     }
 }

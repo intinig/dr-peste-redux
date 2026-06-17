@@ -148,8 +148,10 @@ pub async fn breakdown<C: Comparables + ?Sized>(
                 let without_both = estimate(c, &q, limit).await?;
                 let drop_both = baseline.typical - without_both.typical;
                 let sum_individual = ranked[0].delta_divine + ranked[1].delta_divine;
-                // Super-additive synergy: removing both costs more than the sum
-                // of removing each individually.
+                // Super-additive synergy: A and B are worth more together than apart.
+                // The shared interaction term is counted in BOTH single-drop deltas,
+                // so `sum_individual - drop_both` isolates it — positive exactly when
+                // the pair is super-additive.
                 let extra = sum_individual - drop_both;
                 if extra > f64::EPSILON {
                     Some(SynergyNote {
