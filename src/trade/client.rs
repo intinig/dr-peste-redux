@@ -148,6 +148,12 @@ impl TradeClient {
                         let currency = Self::parse_currency(price.get("currency")?.as_str()?);
                         let money = Money { amount, currency };
                         let price_divine = self.rates.to_divine(&money);
+                        // Drop listings in currencies we can't convert to divine
+                        // (e.g. "aug"); pricing them at 0 would poison the estimate.
+                        // Broader currency support is a follow-up.
+                        if price_divine <= 0.0 {
+                            return None;
+                        }
                         Some(Listing {
                             price: money,
                             price_divine,
@@ -310,6 +316,22 @@ mod tests {
         assert_eq!(retry_after_secs(&h), 10);
     }
 
+    #[test]
+    fn parse_fetch_drops_unconvertible_currency_listings() {
+        let client = TradeClient::new(None).unwrap();
+        let v = serde_json::json!({
+            "result": [
+                { "listing": { "price": { "amount": 2.0, "currency": "divine" } } },
+                { "listing": { "price": { "amount": 1.0, "currency": "aug" } } },
+                { "listing": { "price": { "amount": 50.0, "currency": "chaos" } } }
+            ]
+        });
+        let listings = client.parse_fetch(&v);
+        // "aug" is unconvertible → dropped; divine + chaos kept, both positive.
+        assert_eq!(listings.len(), 2);
+        assert!(listings.iter().all(|l| l.price_divine > 0.0));
+    }
+
     #[tokio::test]
     #[ignore = "hits the live trade2 API"]
     async fn live_search_fetch_smoke() {
@@ -328,8 +350,9 @@ mod tests {
             .fetch(&resp.id, &resp.hashes[..resp.hashes.len().min(5)])
             .await
             .unwrap();
-        assert!(!listings.is_empty());
-        assert!(listings.iter().all(|l| l.price_divine >= 0.0));
+        // Empty is valid: all live listings may be priced in minor currencies (e.g. "aug"),
+        // which are dropped by parse_fetch. Any kept listing must be strictly positive.
+        assert!(listings.iter().all(|l| l.price_divine > 0.0));
     }
 
     #[cfg(test)]
