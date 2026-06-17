@@ -205,5 +205,10 @@ mod tests {
         assert!(catalog
             .match_stat("+40 to maximum Life", StatGroup::Explicit)
             .is_some());
+        // spell-skills is a top spellcaster driver and is NOT a trade2 pseudo —
+        // it must resolve as an explicit (regression guard for the dropped rule).
+        assert!(catalog
+            .match_stat("+7 to Level of all Spell Skills", StatGroup::Explicit)
+            .is_some());
     }
 }

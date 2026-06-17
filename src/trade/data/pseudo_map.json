@@ -18,10 +18,5 @@
     "pseudo_id": "pseudo.pseudo_total_attributes",
     "label": "Total Attributes",
     "patterns": ["to Strength", "to Dexterity", "to Intelligence", "to all Attributes"]
-  },
-  {
-    "pseudo_id": "pseudo.pseudo_adds_to_all_spell_skills",
-    "label": "+# to Level of all Spell Skills",
-    "patterns": ["to Level of all Spell Skills"]
   }
 ]
