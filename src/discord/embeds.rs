@@ -1,7 +1,9 @@
 use poise::serenity_prelude as serenity;
 
+use crate::itemtext::ParsedItem;
 use crate::poeninja::model::PricedItem;
 use crate::poeninja::League;
+use crate::trade::model::{Breakdown, Confidence, Contribution, PriceEstimate};
 
 /// Picks a human-friendly value string: divine if ≥1 divine, else exalted if
 /// ≥1 exalted, else chaos.
@@ -82,6 +84,70 @@ pub fn farm_embed(title: &str, items: &[&PricedItem], league: &League) -> sereni
         )))
 }
 
+pub fn estimate_value_string(est: &PriceEstimate) -> String {
+    if est.listing_count == 0 {
+        return "No comparable listings".to_string();
+    }
+    if (est.high - est.low).abs() < f64::EPSILON {
+        format!("~{:.1} div", est.typical)
+    } else {
+        format!("{:.1}–{:.1} div", est.low, est.high)
+    }
+}
+
+pub fn confidence_string(c: &Confidence) -> String {
+    match c {
+        Confidence::High => "High",
+        Confidence::Medium => "Medium",
+        Confidence::Low => "Low",
+    }
+    .to_string()
+}
+
+pub fn contribution_line(c: &Contribution) -> String {
+    format!("• {} — ~{:.1} div", c.characteristic, c.delta_divine)
+}
+
+pub fn estimate_embed(parsed: &ParsedItem, est: &PriceEstimate, league: &League) -> serenity::CreateEmbed {
+    let title = parsed.base_type.clone().unwrap_or_else(|| parsed.name.clone());
+    serenity::CreateEmbed::default()
+        .title(title)
+        .description(format!("**{}**", parsed.name))
+        .field("Estimated value", estimate_value_string(est), true)
+        .field(
+            "Confidence",
+            format!("{} ({} listings)", confidence_string(&est.confidence), est.listing_count),
+            true,
+        )
+        .footer(serenity::CreateEmbedFooter::new(format!(
+            "live trade • {} • not affiliated with GGG",
+            league.name
+        )))
+}
+
+pub fn breakdown_embed(parsed: &ParsedItem, bd: &Breakdown, league: &League) -> serenity::CreateEmbed {
+    let mut lines: Vec<String> = bd.ranked.iter().map(contribution_line).collect();
+    if let Some(syn) = &bd.synergy {
+        lines.push(format!(
+            "✨ synergy: **{}** + **{}** add ~{:.1} div together",
+            syn.a, syn.b, syn.extra_divine
+        ));
+    }
+    let body = if lines.is_empty() {
+        "No drivers identified.".to_string()
+    } else {
+        lines.join("\n")
+    };
+    serenity::CreateEmbed::default()
+        .title(format!("What drives the price — {}", parsed.name))
+        .description(body)
+        .url(bd.trade_url.clone())
+        .footer(serenity::CreateEmbedFooter::new(format!(
+            "live trade • {} • not affiliated with GGG",
+            league.name
+        )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -128,5 +194,34 @@ mod tests {
             ninja_url(&it, &league),
             "https://poe.ninja/poe2/economy/runesofaldur/currency/divine-orb"
         );
+    }
+
+    use crate::trade::model::{AblationKind, Confidence, Contribution, PriceEstimate};
+
+    #[test]
+    fn estimate_value_string_formats_range_and_confidence() {
+        let est = PriceEstimate {
+            low: 8.0,
+            typical: 8.0,
+            high: 15.0,
+            listing_count: 12,
+            confidence: Confidence::High,
+        };
+        let s = estimate_value_string(&est);
+        assert!(s.contains("8"));
+        assert!(s.contains("15"));
+        assert_eq!(confidence_string(&est.confidence), "High");
+    }
+
+    #[test]
+    fn contribution_line_shows_label_and_delta() {
+        let c = Contribution {
+            characteristic: "+to all Spell Skills".into(),
+            kind: AblationKind::Drop,
+            delta_divine: 16.0,
+        };
+        let line = contribution_line(&c);
+        assert!(line.contains("+to all Spell Skills"));
+        assert!(line.contains("16"));
     }
 }
