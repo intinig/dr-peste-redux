@@ -163,8 +163,6 @@ impl TradeClient {
     }
 
     /// Fetches the raw `data/stats` catalog JSON.
-    // wired in T1.5-4/T1.5-6
-    #[allow(dead_code)]
     pub async fn fetch_stats_raw(&self) -> Result<String> {
         let url = format!("{TRADE_BASE}/data/stats");
         Ok(self

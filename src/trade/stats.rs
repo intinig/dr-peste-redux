@@ -107,15 +107,11 @@ impl StatCatalog {
         self.groups.get(&group)?.get(&normalize(raw_line)).cloned()
     }
 
-    // wired in T1.5-4/T1.5-6
-    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.groups.values().all(|m| m.is_empty())
     }
 
     /// Fetches the live catalog from the trade2 API.
-    // wired in T1.5-4/T1.5-6
-    #[allow(dead_code)]
     pub async fn fetch(client: &crate::trade::client::TradeClient) -> Result<Self> {
         Self::from_json(&client.fetch_stats_raw().await?)
     }
@@ -194,5 +190,20 @@ mod tests {
             normalize("Adds 5 to 12 Fire Damage"),
             "Adds # to # Fire Damage"
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "hits the live trade2 API"]
+    async fn live_catalog_matches_a_common_mod() {
+        let rates = std::sync::Arc::new(std::sync::RwLock::new(
+            crate::trade::rates::RateTable::default(),
+        ));
+        let client = crate::trade::client::TradeClient::new(None, rates).unwrap();
+        let catalog = StatCatalog::fetch(&client).await.unwrap();
+        assert!(!catalog.is_empty());
+        // a ubiquitous explicit mod should resolve to some stat id
+        assert!(catalog
+            .match_stat("+40 to maximum Life", StatGroup::Explicit)
+            .is_some());
     }
 }

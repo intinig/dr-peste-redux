@@ -6,7 +6,6 @@ mod pricelog;
 mod store;
 mod trade;
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -19,7 +18,6 @@ use pricelog::ProbeLog;
 use store::{PriceStore, Snapshot};
 use trade::client::TradeClient;
 use trade::pseudo::PseudoMap;
-use trade::stats::StatCatalog;
 use trade::TradePricer;
 
 async fn refresh_once(
@@ -72,10 +70,24 @@ async fn main() -> Result<()> {
     let client = NinjaClient::new()?;
     let rates = std::sync::Arc::new(std::sync::RwLock::new(trade::rates::RateTable::default()));
     let trade_client = TradeClient::new(config.poe_sessid.clone(), rates.clone())?;
-    let pricer = Arc::new(TradePricer::new(
+    let catalog = match trade::stats::StatCatalog::fetch(&trade_client).await {
+        Ok(c) if !c.is_empty() => {
+            tracing::info!("loaded trade2 stat catalog");
+            c
+        }
+        Ok(c) => {
+            tracing::warn!("trade2 stat catalog is empty; pricing falls back to pseudo-only");
+            c
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to fetch trade2 stat catalog; pricing falls back to pseudo-only");
+            trade::stats::StatCatalog::default()
+        }
+    };
+    let pricer = std::sync::Arc::new(TradePricer::new(
         trade_client,
         PseudoMap::load(),
-        StatCatalog::default(),
+        catalog,
         ProbeLog::new("probes.jsonl"),
     ));
 
