@@ -17,6 +17,10 @@ pub trait Comparables {
     async fn comparables(&self, query: &TradeQuery, limit: usize) -> Result<Vec<Listing>>;
 }
 
+/// Hard cap on how many stats a single breakdown will probe, to bound the
+/// query budget for pathological items. Normal rares have far fewer.
+const PROBE_CEILING: usize = 16;
+
 /// Searches + fetches up to `limit` cheapest listings. If fewer than `limit`
 /// are found, relaxes the query (drops the last stat filter) and retries, up to
 /// `max_relax` times. Returns whatever it has (possibly empty).
@@ -92,12 +96,11 @@ fn estimate_from(listings: &[Listing]) -> PriceEstimate {
     }
 }
 
-/// Ablate the top-`k` stat filters (single-drop), ranked by delta, plus one
-/// pairwise probe on the top two to flag synergy.
+/// Ablate every stat filter (up to `PROBE_CEILING`), rank by measured price delta,
+/// and display the top-`k`; plus one pairwise probe on the top two for synergy.
 ///
-/// Query budget per call: 1 baseline + min(k, stats.len()) single-drops + 1 pairwise.
-/// v1 stat selection: iterate `query.stats` in order and take the first `k`
-/// (a smarter clipboard heuristic is a documented follow-up).
+/// Query budget per call: 1 baseline + min(n, ceiling) single-drops + 1 pairwise
+/// (deduplicated by the client's query cache).
 pub async fn breakdown<C: Comparables + ?Sized>(
     c: &C,
     query: &TradeQuery,
@@ -106,8 +109,8 @@ pub async fn breakdown<C: Comparables + ?Sized>(
 ) -> Result<Breakdown> {
     let baseline = estimate(c, query, limit).await?;
 
-    // Select at most k stats to probe (v1: take first k in order).
-    let probe_count = k.max(1).min(query.stats.len());
+    // Probe every stat up to the ceiling so ranking is by measured impact.
+    let probe_count = query.stats.len().min(PROBE_CEILING);
 
     let mut ranked: Vec<Contribution> = Vec::new();
     for i in 0..probe_count {
@@ -126,7 +129,7 @@ pub async fn breakdown<C: Comparables + ?Sized>(
             .partial_cmp(&a.delta_divine)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    // Defensive truncate — ranked already has at most k entries, but keep for clarity.
+    // Truncate display to top-k by measured delta.
     ranked.truncate(k.max(1));
 
     // Pairwise synergy on the top two (by name → find their indices in query).
@@ -330,17 +333,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn breakdown_query_budget_is_bounded_by_k() {
+    async fn breakdown_probes_all_stats_ranks_by_delta() {
         // Build a query with 6 stat filters.
         let q = q_with(6);
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let fake = CountingComparables {
             calls: calls.clone(),
         };
-        // k=4 → budget ≤ 1 baseline + 4 single-drops + 1 pairwise = 6
-        breakdown(&fake, &q, 10, 4).await.unwrap();
+        // 6 stats, k=4, ceiling=16 → 1 baseline + 6 single-drops + 1 pairwise = 8
+        let bd = breakdown(&fake, &q, 10, 4).await.unwrap();
         let n = calls.load(std::sync::atomic::Ordering::SeqCst);
-        assert!(n <= 6, "expected ≤ 6 comparables calls (1+4+1), got {n}");
+        assert_eq!(n, 8, "expected 8 comparables calls (1+6+1), got {n}");
+        assert_eq!(bd.ranked.len(), 4, "display should be truncated to k=4");
     }
 
     #[tokio::test]
