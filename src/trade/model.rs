@@ -130,7 +130,10 @@ mod tests {
     #[test]
     fn money_to_divine_field_is_independent_of_currency() {
         let l = Listing {
-            price: Money { amount: 5.0, currency: Currency::Exalted },
+            price: Money {
+                amount: 5.0,
+                currency: Currency::Exalted,
+            },
             price_divine: 0.5,
         };
         assert_eq!(l.price_divine, 0.5);
