@@ -97,7 +97,7 @@ async fn main() -> Result<()> {
     }
 
     let interval = Duration::from_secs(config.poll_interval_mins * 60);
-    spawn_refresher(client, store.clone(), rates, interval);
+    spawn_refresher(client, store.clone(), rates.clone(), interval);
 
     let token = config.discord_token.clone();
     let guild_id = serenity::GuildId::new(config.guild_id);
@@ -122,6 +122,7 @@ async fn main() -> Result<()> {
                     store,
                     config,
                     pricer,
+                    rates,
                 })
             })
         })

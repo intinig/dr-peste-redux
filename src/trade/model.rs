@@ -11,6 +11,27 @@ pub enum Currency {
     Other(String),
 }
 
+impl Currency {
+    /// Rate-table lookup key.
+    pub fn code(&self) -> &str {
+        match self {
+            Currency::Chaos => "chaos",
+            Currency::Exalted => "exalted",
+            Currency::Divine => "divine",
+            Currency::Other(s) => s,
+        }
+    }
+    /// Short label for display.
+    pub fn short(&self) -> &str {
+        match self {
+            Currency::Chaos => "chaos",
+            Currency::Exalted => "ex",
+            Currency::Divine => "div",
+            Currency::Other(s) => s,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Money {
     pub amount: f64,
@@ -86,6 +107,7 @@ pub struct PriceEstimate {
     pub high: f64,
     pub listing_count: usize,
     pub confidence: Confidence,
+    pub modal_currency: Currency,
 }
 
 /// Describes how a stat filter was ablated in a breakdown probe.

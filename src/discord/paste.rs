@@ -82,6 +82,17 @@ async fn price_rare(
         }
     };
 
+    let secondary_rate = if matches!(est.modal_currency, crate::trade::model::Currency::Divine) {
+        None
+    } else {
+        let code = est.modal_currency.code().to_string();
+        ctx.data()
+            .rates
+            .read()
+            .ok()
+            .and_then(|r| r.to_divine(1.0, &code))
+    };
+
     let button = serenity::CreateButton::new("drp_breakdown")
         .label("Break it down")
         .style(serenity::ButtonStyle::Secondary);
@@ -91,7 +102,7 @@ async fn price_rare(
     let reply = ctx
         .send(
             poise::CreateReply::default()
-                .embed(embeds::estimate_embed(parsed, &est, league))
+                .embed(embeds::estimate_embed(parsed, &est, league, secondary_rate))
                 .components(vec![row]),
         )
         .await?;
@@ -131,7 +142,7 @@ async fn price_rare(
                 .edit(
                     *ctx,
                     poise::CreateReply::default()
-                        .embed(embeds::estimate_embed(parsed, &est, league))
+                        .embed(embeds::estimate_embed(parsed, &est, league, secondary_rate))
                         .components(vec![]),
                 )
                 .await?;
@@ -141,7 +152,7 @@ async fn price_rare(
                 .edit(
                     *ctx,
                     poise::CreateReply::default()
-                        .embed(embeds::estimate_embed(parsed, &est, league))
+                        .embed(embeds::estimate_embed(parsed, &est, league, secondary_rate))
                         .components(vec![]),
                 )
                 .await?;

@@ -6,8 +6,8 @@ use async_trait::async_trait;
 
 use crate::trade::client::TradeApi;
 use crate::trade::model::{
-    AblationKind, Breakdown, Confidence, Contribution, Listing, PriceEstimate, SynergyNote,
-    TradeQuery,
+    AblationKind, Breakdown, Confidence, Contribution, Currency, Listing, PriceEstimate,
+    SynergyNote, TradeQuery,
 };
 
 /// High-level seam the pricer depends on. `TradeClient` implements it via
@@ -75,6 +75,23 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
     sorted[lo] + (sorted[hi] - sorted[lo]) * (rank - lo as f64)
 }
 
+/// The currency most listings are priced in (the market's preferred unit for
+/// this item). Defaults to Divine when there are no listings.
+fn modal_currency(listings: &[Listing]) -> Currency {
+    use std::collections::HashMap;
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for l in listings {
+        *counts.entry(l.price.currency.code()).or_insert(0) += 1;
+    }
+    match counts.into_iter().max_by_key(|(_, n)| *n).map(|(c, _)| c) {
+        Some("exalted") => Currency::Exalted,
+        Some("chaos") => Currency::Chaos,
+        Some("divine") => Currency::Divine,
+        Some(other) => Currency::Other(other.to_string()),
+        None => Currency::Divine,
+    }
+}
+
 fn estimate_from(listings: &[Listing]) -> PriceEstimate {
     let mut prices: Vec<f64> = listings.iter().map(|l| l.price_divine).collect();
     prices.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
@@ -93,6 +110,7 @@ fn estimate_from(listings: &[Listing]) -> PriceEstimate {
         high,
         listing_count: n,
         confidence: Confidence::from_count(n),
+        modal_currency: modal_currency(listings),
     }
 }
 
