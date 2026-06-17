@@ -195,14 +195,29 @@ pub async fn breakdown<C: Comparables + ?Sized>(
     })
 }
 
+/// Percent-encodes a string as a URL path segment: RFC 3986 unreserved chars
+/// are kept, everything else (spaces, reserved chars, non-ASCII) is encoded, so
+/// arbitrary league names produce a well-formed URL.
+fn encode_segment(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
 /// Human-clickable trade2 search URL for the item's league (a fresh search; the
-/// API search id is ephemeral, so we link to the site search page instead).
-/// The league is URL-encoded — PoE league names contain spaces (e.g. "Runes of
-/// Aldur"), and an unencoded space makes Discord reject the embed `url`.
+/// API search id is ephemeral, so we link to the site search page). The PoE2
+/// trade site route is realm-namespaced (`/trade2/search/poe2/<league>`), and
+/// the league is percent-encoded so the embed `url` is always well-formed.
 pub fn trade_url(query: &TradeQuery) -> String {
     format!(
-        "https://www.pathofexile.com/trade2/search/{}",
-        query.league.replace(' ', "%20")
+        "https://www.pathofexile.com/trade2/search/poe2/{}",
+        encode_segment(&query.league)
     )
 }
 
@@ -395,7 +410,7 @@ mod tests {
     }
 
     #[test]
-    fn trade_url_encodes_league_spaces() {
+    fn trade_url_has_poe2_realm_and_encodes_league() {
         let q = TradeQuery {
             league: "Runes of Aldur".into(),
             category: None,
@@ -408,6 +423,16 @@ mod tests {
             !url.contains(' '),
             "url must not contain a raw space: {url}"
         );
-        assert!(url.ends_with("/Runes%20of%20Aldur"));
+        assert!(
+            url.ends_with("/trade2/search/poe2/Runes%20of%20Aldur"),
+            "{url}"
+        );
+        // reserved characters in a league name are percent-encoded
+        let q2 = TradeQuery {
+            league: "A/B".into(),
+            ..q
+        };
+        let url2 = trade_url(&q2);
+        assert!(url2.ends_with("/poe2/A%2FB"), "{url2}");
     }
 }

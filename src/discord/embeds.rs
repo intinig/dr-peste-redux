@@ -248,7 +248,7 @@ mod tests {
     use crate::trade::model::{AblationKind, Confidence, Contribution};
 
     #[test]
-    fn div_str_formats_one_decimal() {
+    fn div_str_formats_by_magnitude() {
         assert_eq!(div_str(8.0), "8.0 div");
         assert_eq!(div_str(1.0), "1.0 div");
         // sub-1-div values get finer precision so cheap items aren't "0.0 div"
