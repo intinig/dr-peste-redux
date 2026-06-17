@@ -6,6 +6,7 @@ pub mod client;
 pub mod model;
 pub mod pseudo;
 pub mod query;
+pub mod rates;
 
 use anyhow::Result;
 

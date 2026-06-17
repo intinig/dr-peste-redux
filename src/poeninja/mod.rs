@@ -84,6 +84,25 @@ impl NinjaClient {
         }
     }
 
+    /// Returns a map of trade2 currency code → value in Divine Orbs, sourced
+    /// from the poe.ninja currency exchange overview for the given league.
+    pub async fn currency_rates(
+        &self,
+        league: &str,
+    ) -> Result<std::collections::HashMap<String, f64>> {
+        let url = format!("{BASE}/economy/exchange/current/overview");
+        let ov: model::ExchangeOverview = self
+            .http
+            .get(url)
+            .query(&[("league", league), ("type", "Currency")])
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        Ok(model::currency_rates_from(&ov))
+    }
+
     /// Fetches every category sequentially (polite). A failing category is
     /// logged and skipped, never fatal.
     pub async fn fetch_all(&self, league: &str) -> Vec<PricedItem> {

@@ -21,8 +21,16 @@ use trade::client::TradeClient;
 use trade::pseudo::PseudoMap;
 use trade::TradePricer;
 
-async fn refresh_once(client: &NinjaClient, store: &PriceStore) -> Result<()> {
+async fn refresh_once(
+    client: &NinjaClient,
+    store: &PriceStore,
+    rates: &std::sync::Arc<std::sync::RwLock<trade::rates::RateTable>>,
+) -> Result<()> {
     let league = client.current_league().await?;
+    match client.currency_rates(&league.name).await {
+        Ok(map) => *rates.write().unwrap() = trade::rates::RateTable::new(map),
+        Err(e) => tracing::warn!(error = %e, "currency rate refresh failed; keeping last rates"),
+    }
     let items = client.fetch_all(&league.name).await;
     if items.is_empty() {
         tracing::warn!(league = %league.name, "all categories returned no items; keeping last snapshot");
@@ -33,10 +41,15 @@ async fn refresh_once(client: &NinjaClient, store: &PriceStore) -> Result<()> {
     Ok(())
 }
 
-fn spawn_refresher(client: NinjaClient, store: PriceStore, interval: Duration) {
+fn spawn_refresher(
+    client: NinjaClient,
+    store: PriceStore,
+    rates: std::sync::Arc<std::sync::RwLock<trade::rates::RateTable>>,
+    interval: Duration,
+) {
     tokio::spawn(async move {
         loop {
-            if let Err(e) = refresh_once(&client, &store).await {
+            if let Err(e) = refresh_once(&client, &store, &rates).await {
                 tracing::error!(error = %e, "refresh failed; keeping last snapshot");
             }
             tokio::time::sleep(interval).await;
@@ -56,7 +69,8 @@ async fn main() -> Result<()> {
     let config = config::Config::from_env()?;
     let store = PriceStore::new();
     let client = NinjaClient::new()?;
-    let trade_client = TradeClient::new(config.poe_sessid.clone())?;
+    let rates = std::sync::Arc::new(std::sync::RwLock::new(trade::rates::RateTable::default()));
+    let trade_client = TradeClient::new(config.poe_sessid.clone(), rates.clone())?;
     let pricer = Arc::new(TradePricer::new(
         trade_client,
         PseudoMap::load(),
@@ -64,12 +78,12 @@ async fn main() -> Result<()> {
     ));
 
     // Best-effort initial refresh so commands have data quickly.
-    if let Err(e) = refresh_once(&client, &store).await {
+    if let Err(e) = refresh_once(&client, &store, &rates).await {
         tracing::warn!(error = %e, "initial refresh failed; will retry in background");
     }
 
     let interval = Duration::from_secs(config.poll_interval_mins * 60);
-    spawn_refresher(client, store.clone(), interval);
+    spawn_refresher(client, store.clone(), rates, interval);
 
     let token = config.discord_token.clone();
     let guild_id = serenity::GuildId::new(config.guild_id);

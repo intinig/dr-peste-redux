@@ -164,10 +164,43 @@ pub fn normalize_item(cat: &Category, ov: ItemOverview) -> Vec<PricedItem> {
         .collect()
 }
 
+/// Maps each currency's trade2 code (the exchange line id) to its value in
+/// Divine Orbs, from a currency exchange overview.
+pub fn currency_rates_from(ov: &ExchangeOverview) -> std::collections::HashMap<String, f64> {
+    ov.lines
+        .iter()
+        .map(|line| (line.id.clone(), convert(&ov.core, line.primary_value).2))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::poeninja::categories::by_slug;
+
+    #[test]
+    fn currency_rates_from_maps_codes_to_divine() {
+        let ov: ExchangeOverview =
+            serde_json::from_str(include_str!("fixtures/exchange_currency.json")).unwrap();
+        let rates = super::currency_rates_from(&ov);
+        // Divine line: primaryValue = 1, core.primary = "divine" → convert returns (chaos=11.01, exalted=184.7, divine=1.0)
+        let divine_rate = rates["divine"];
+        assert!(
+            (divine_rate - 1.0).abs() < 1e-9,
+            "divine rate should be ~1.0, got {divine_rate}"
+        );
+        // Exalted line: primaryValue = 0.005415, core.primary = "divine" → divine = 0.005415
+        let exalted_rate = rates["exalted"];
+        assert!(
+            (exalted_rate - 0.005415).abs() < 1e-9,
+            "exalted rate should be ~0.005415, got {exalted_rate}"
+        );
+        assert_eq!(
+            rates.len(),
+            2,
+            "should have exactly 2 entries (one per line)"
+        );
+    }
 
     #[test]
     fn normalizes_exchange_with_join_and_conversion() {

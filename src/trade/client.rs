@@ -6,40 +6,15 @@ use async_trait::async_trait;
 use reqwest::{header, Client};
 use serde_json::Value;
 
+use std::sync::{Arc, RwLock};
+
 use crate::trade::model::{Currency, Listing, Money, SearchResponse, TradeQuery};
 use crate::trade::query::to_payload;
+use crate::trade::rates::RateTable;
 
 const TRADE_BASE: &str = "https://www.pathofexile.com/api/trade2";
 const USER_AGENT: &str =
     "dr-peste-redux/0.1 (Discord guild price bot; not affiliated with Grinding Gear Games)";
-
-/// Divine-Orb conversion rates. v1 defaults; refreshing from the live currency
-/// market is a later refinement.
-#[derive(Clone, Debug)]
-pub struct CurrencyRates {
-    pub exalted_per_divine: f64,
-    pub chaos_per_divine: f64,
-}
-
-impl Default for CurrencyRates {
-    fn default() -> Self {
-        CurrencyRates {
-            exalted_per_divine: 180.0,
-            chaos_per_divine: 2000.0,
-        }
-    }
-}
-
-impl CurrencyRates {
-    pub fn to_divine(&self, m: &Money) -> f64 {
-        match m.currency {
-            Currency::Divine => m.amount,
-            Currency::Exalted => m.amount / self.exalted_per_divine,
-            Currency::Chaos => m.amount / self.chaos_per_divine,
-            Currency::Other(_) => 0.0,
-        }
-    }
-}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct RateRule {
@@ -98,7 +73,7 @@ pub trait TradeApi {
 
 pub struct TradeClient {
     http: Client,
-    rates: CurrencyRates,
+    rates: Arc<RwLock<RateTable>>,
     /// Short-lived cache keyed by `"<limit>|<query_json>"`.
     /// Entries expire after 60 seconds so repeated calls (e.g. the baseline
     /// probe shared between `price` and `breakdown`) hit trade2 only once,
@@ -111,7 +86,8 @@ pub struct TradeClient {
 impl TradeClient {
     /// `poe_sessid` optional: when present it is sent as the POESESSID cookie to
     /// raise the rate-limit ceiling; otherwise requests are anonymous.
-    pub fn new(poe_sessid: Option<String>) -> Result<Self> {
+    /// `rates` is the live currency rate table shared with the refresher task.
+    pub fn new(poe_sessid: Option<String>, rates: Arc<RwLock<RateTable>>) -> Result<Self> {
         let mut builder = Client::builder().user_agent(USER_AGENT);
         if let Some(sess) = poe_sessid.filter(|s| !s.is_empty()) {
             let mut headers = header::HeaderMap::new();
@@ -121,7 +97,7 @@ impl TradeClient {
         }
         Ok(Self {
             http: builder.build()?,
-            rates: CurrencyRates::default(),
+            rates,
             cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         })
     }
@@ -145,15 +121,17 @@ impl TradeClient {
                     .filter_map(|entry| {
                         let price = entry.get("listing")?.get("price")?;
                         let amount = price.get("amount")?.as_f64()?;
-                        let currency = Self::parse_currency(price.get("currency")?.as_str()?);
-                        let money = Money { amount, currency };
-                        let price_divine = self.rates.to_divine(&money);
+                        let code = price.get("currency")?.as_str()?;
                         // Drop listings in currencies we can't convert to divine
                         // (e.g. "aug"); pricing them at 0 would poison the estimate.
-                        // Broader currency support is a follow-up.
+                        let price_divine = self.rates.read().unwrap().to_divine(amount, code)?;
                         if price_divine <= 0.0 {
                             return None;
                         }
+                        let money = Money {
+                            amount,
+                            currency: Self::parse_currency(code),
+                        };
                         Some(Listing {
                             price: money,
                             price_divine,
@@ -316,9 +294,22 @@ mod tests {
         assert_eq!(retry_after_secs(&h), 10);
     }
 
+    fn test_client() -> TradeClient {
+        TradeClient::new(
+            None,
+            std::sync::Arc::new(std::sync::RwLock::new(crate::trade::rates::RateTable::new(
+                std::collections::HashMap::from([
+                    ("divine".to_string(), 1.0),
+                    ("chaos".to_string(), 0.1),
+                ]),
+            ))),
+        )
+        .unwrap()
+    }
+
     #[test]
     fn parse_fetch_drops_unconvertible_currency_listings() {
-        let client = TradeClient::new(None).unwrap();
+        let client = test_client();
         let v = serde_json::json!({
             "result": [
                 { "listing": { "price": { "amount": 2.0, "currency": "divine" } } },
@@ -336,9 +327,14 @@ mod tests {
     #[ignore = "hits the live trade2 API"]
     async fn live_search_fetch_smoke() {
         use crate::trade::model::{MiscFilters, TradeQuery};
-        let client = TradeClient::new(None).unwrap();
+        let nc = crate::poeninja::NinjaClient::new().unwrap();
+        let league = nc.current_league().await.unwrap().name;
+        let rates = std::sync::Arc::new(std::sync::RwLock::new(
+            crate::trade::rates::RateTable::new(nc.currency_rates(&league).await.unwrap()),
+        ));
+        let client = TradeClient::new(None, rates).unwrap();
         let q = TradeQuery {
-            league: live_league().await,
+            league: league.clone(),
             category: None,
             type_line: Some("Sapphire Ring".into()),
             stats: vec![],
@@ -350,14 +346,10 @@ mod tests {
             .fetch(&resp.id, &resp.hashes[..resp.hashes.len().min(5)])
             .await
             .unwrap();
-        // Empty is valid: all live listings may be priced in minor currencies (e.g. "aug"),
-        // which are dropped by parse_fetch. Any kept listing must be strictly positive.
+        assert!(
+            !listings.is_empty(),
+            "expected non-empty listings with live rates"
+        );
         assert!(listings.iter().all(|l| l.price_divine > 0.0));
-    }
-
-    #[cfg(test)]
-    async fn live_league() -> String {
-        let nc = crate::poeninja::NinjaClient::new().unwrap();
-        nc.current_league().await.unwrap().name
     }
 }
