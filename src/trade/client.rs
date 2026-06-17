@@ -203,6 +203,17 @@ impl TradeApi for TradeClient {
     }
 }
 
+#[async_trait]
+impl crate::trade::ablation::Comparables for TradeClient {
+    async fn comparables(
+        &self,
+        query: &crate::trade::model::TradeQuery,
+        limit: usize,
+    ) -> anyhow::Result<Vec<crate::trade::model::Listing>> {
+        crate::trade::ablation::gather_comparables(self, query, limit, 3).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
