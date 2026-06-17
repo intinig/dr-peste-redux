@@ -72,25 +72,31 @@ fn labeled_u32(lines: &[&str], label: &str) -> Option<u32> {
         .map(|n| n as u32)
 }
 
-/// True for lines that are headers/properties/requirements rather than mods.
+/// True for lines that are headers/properties/requirements/annotations rather
+/// than item mods.
 fn is_meta_line(l: &str) -> bool {
-    const PREFIXES: [&str; 11] = [
+    const PREFIXES: [&str; 15] = [
         "Item Class:",
         "Rarity:",
         "Requirements:",
+        "Requires:",
         "Level:",
         "Item Level:",
         "Quality:",
         "Sockets:",
         "Stack Size:",
-        "Str",
+        "Energy Shield:",
+        "Armour:",
+        "Evasion:",
+        "Str", // Strength/Dexterity/Intelligence attribute requirements
         "Dex",
-        "Int", // attribute reqs
+        "Int",
     ];
     l.is_empty()
         || is_separator(l)
         || l == "Corrupted"
         || l == "Unidentified"
+        || l.starts_with('{') // Advanced Mode "{ ... Modifier (Tier: N) ... }" annotations
         || PREFIXES.iter().any(|p| l.starts_with(p))
 }
 
@@ -278,5 +284,37 @@ mod tests {
         assert_eq!(p.item_level, Some(82));
         assert_eq!(p.quality, Some(20));
         assert!(p.corrupted);
+    }
+
+    const RARE_BOOTS_ADVANCED: &str = "Item Class: Boots\nRarity: Rare\nKraken Slippers\nSandsworn Sandals\n--------\nEnergy Shield: 78\n--------\nRequires: Level 75, 101 Int\n--------\nSockets: S \n--------\nItem Level: 83\n--------\n+18% to Cold Resistance (rune)\n--------\n{ Prefix Modifier \"Hellion's\" (Tier: 1) — Speed }\n35% increased Movement Speed\n{ Suffix Modifier \"of the Maelstrom\" (Tier: 3) — Elemental, Lightning, Resistance }\n+34(31-35)% to Lightning Resistance\n{ Suffix Modifier \"of Magma\" (Tier: 2) — Elemental, Fire, Resistance }\n+39(36-40)% to Fire Resistance\n{ Suffix Modifier \"of Archaeology\" (Tier: 1) }\n16(15-18)% increased Rarity of Items found\n";
+
+    #[test]
+    fn parses_advanced_mode_boots() {
+        let p = parse(RARE_BOOTS_ADVANCED).unwrap();
+        assert_eq!(p.base_type.as_deref(), Some("Sandsworn Sandals"));
+        assert_eq!(p.item_level, Some(83));
+        assert_eq!(p.runes.len(), 1, "rune mod should be captured");
+        let raws: Vec<&str> = p.explicits.iter().map(|s| s.raw.as_str()).collect();
+        assert!(
+            raws.iter().any(|r| r.contains("increased Movement Speed")),
+            "{raws:?}"
+        );
+        let rarity = p
+            .explicits
+            .iter()
+            .find(|s| s.raw.contains("Rarity of Items found"))
+            .expect("rarity mod present");
+        // value is the current roll (16), not affected by the (15-18) range
+        assert_eq!(rarity.value, Some(16.0));
+        // Advanced-Mode annotation + property lines must NOT leak as mods
+        assert!(
+            !raws.iter().any(|r| r.starts_with('{')),
+            "annotation leaked: {raws:?}"
+        );
+        assert!(
+            !raws.iter().any(|r| r.contains("Energy Shield")),
+            "{raws:?}"
+        );
+        assert!(!raws.iter().any(|r| r.contains("Requires")), "{raws:?}");
     }
 }
