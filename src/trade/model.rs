@@ -1,6 +1,8 @@
 //! Domain types for trade pricing. Amounts in `*_divine` are normalized to
 //! Divine Orbs, the common comparison unit.
 
+use serde::Serialize;
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Currency {
     Chaos,
@@ -22,7 +24,7 @@ pub struct Listing {
     pub price_divine: f64,
 }
 
-#[derive(Clone, Debug, PartialEq, Default)]
+#[derive(Clone, Debug, PartialEq, Default, Serialize)]
 pub struct StatFilter {
     /// trade2 stat id, e.g. "explicit.stat_..." or "pseudo.pseudo_total_elemental_resistance".
     pub id: String,
@@ -32,14 +34,14 @@ pub struct StatFilter {
     pub max: Option<f64>,
 }
 
-#[derive(Clone, Debug, PartialEq, Default)]
+#[derive(Clone, Debug, PartialEq, Default, Serialize)]
 pub struct MiscFilters {
     pub item_level_min: Option<u32>,
     pub quality_min: Option<u32>,
     pub corrupted: Option<bool>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct TradeQuery {
     pub league: String,
     /// trade2 category, e.g. "weapon.staff".
@@ -116,7 +118,7 @@ pub struct Breakdown {
     pub trade_url: String,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Probe {
     pub query: TradeQuery,
     pub listing_count: usize,
