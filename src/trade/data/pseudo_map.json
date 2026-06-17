@@ -1,0 +1,27 @@
+[
+  {
+    "pseudo_id": "pseudo.pseudo_total_elemental_resistance",
+    "label": "Total Elemental Resistance",
+    "patterns": ["to Fire Resistance", "to Cold Resistance", "to Lightning Resistance", "to Fire and Lightning Resistance", "to Fire and Cold Resistance", "to Cold and Lightning Resistance", "to all Elemental Resistances"]
+  },
+  {
+    "pseudo_id": "pseudo.pseudo_total_resistance",
+    "label": "Total Resistance (incl. Chaos)",
+    "patterns": ["to Fire Resistance", "to Cold Resistance", "to Lightning Resistance", "to Fire and Lightning Resistance", "to Fire and Cold Resistance", "to Cold and Lightning Resistance", "to all Elemental Resistances", "to Chaos Resistance"]
+  },
+  {
+    "pseudo_id": "pseudo.pseudo_total_life",
+    "label": "Total maximum Life",
+    "patterns": ["to maximum Life"]
+  },
+  {
+    "pseudo_id": "pseudo.pseudo_total_attributes",
+    "label": "Total Attributes",
+    "patterns": ["to Strength", "to Dexterity", "to Intelligence", "to all Attributes"]
+  },
+  {
+    "pseudo_id": "pseudo.pseudo_adds_to_all_spell_skills",
+    "label": "+# to Level of all Spell Skills",
+    "patterns": ["to Level of all Spell Skills"]
+  }
+]
