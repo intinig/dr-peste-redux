@@ -6,6 +6,7 @@ mod pricelog;
 mod store;
 mod trade;
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -14,7 +15,11 @@ use tracing_subscriber::EnvFilter;
 
 use discord::Data;
 use poeninja::NinjaClient;
+use pricelog::ProbeLog;
 use store::{PriceStore, Snapshot};
+use trade::client::TradeClient;
+use trade::pseudo::PseudoMap;
+use trade::TradePricer;
 
 async fn refresh_once(client: &NinjaClient, store: &PriceStore) -> Result<()> {
     let league = client.current_league().await?;
@@ -51,6 +56,12 @@ async fn main() -> Result<()> {
     let config = config::Config::from_env()?;
     let store = PriceStore::new();
     let client = NinjaClient::new()?;
+    let trade_client = TradeClient::new(config.poe_sessid.clone())?;
+    let pricer = Arc::new(TradePricer::new(
+        trade_client,
+        PseudoMap::load(),
+        ProbeLog::new("probes.jsonl"),
+    ));
 
     // Best-effort initial refresh so commands have data quickly.
     if let Err(e) = refresh_once(&client, &store).await {
@@ -79,7 +90,7 @@ async fn main() -> Result<()> {
                 poise::builtins::register_in_guild(ctx, &framework.options().commands, guild_id)
                     .await?;
                 tracing::info!("commands registered; bot ready");
-                Ok(Data { store, config })
+                Ok(Data { store, config, pricer })
             })
         })
         .build();

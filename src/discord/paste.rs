@@ -1,6 +1,9 @@
+use std::time::Duration;
+
 use super::{embeds, AppContext, Context, Error};
+use crate::poeninja::League;
 use crate::store::{self, MatchOutcome};
-use crate::{itemtext, poeninja::League};
+use crate::itemtext;
 
 #[derive(Debug, poise::Modal)]
 #[name = "Paste an item"]
@@ -51,11 +54,88 @@ pub async fn paste(app_ctx: AppContext<'_>) -> Result<(), Error> {
             .await?;
         }
         MatchOutcome::Rare => {
-            ctx.say("That looks like rare/magic gear, which poe.ninja doesn't price. Try a unique or currency item.")
-                .await?;
+            price_rare(&ctx, &parsed, &snap.league).await?;
         }
         MatchOutcome::NotFound => {
             ctx.say(format_not_found(&parsed.name, &snap.league))
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+async fn price_rare(
+    ctx: &Context<'_>,
+    parsed: &itemtext::ParsedItem,
+    league: &League,
+) -> Result<(), Error> {
+    use poise::serenity_prelude as serenity;
+
+    let pricer = ctx.data().pricer.clone();
+    let est = match pricer.price(parsed, &league.name).await {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::warn!(error = %e, "trade price failed");
+            ctx.say("Couldn't reach trade right now — try again shortly.").await?;
+            return Ok(());
+        }
+    };
+
+    let button = serenity::CreateButton::new("drp_breakdown")
+        .label("Break it down")
+        .style(serenity::ButtonStyle::Secondary);
+    let row = serenity::CreateActionRow::Buttons(vec![button]);
+
+    let reply = ctx
+        .send(
+            poise::CreateReply::default()
+                .embed(embeds::estimate_embed(parsed, &est, league))
+                .components(vec![row]),
+        )
+        .await?;
+
+    let msg = reply.message().await?;
+    let interaction = serenity::ComponentInteractionCollector::new(
+        ctx.serenity_context().shard.clone(),
+    )
+    .message_id(msg.id)
+    .custom_ids(vec!["drp_breakdown".to_string()])
+    .timeout(Duration::from_secs(120))
+    .await;
+
+    match interaction {
+        Some(mci) => {
+            mci.defer(ctx.serenity_context()).await?;
+            match pricer.breakdown(parsed, &league.name).await {
+                Ok(bd) => {
+                    mci.create_followup(
+                        ctx.serenity_context(),
+                        serenity::CreateInteractionResponseFollowup::default()
+                            .embed(embeds::breakdown_embed(parsed, &bd, league)),
+                    )
+                    .await?;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "trade breakdown failed");
+                    mci.create_followup(
+                        ctx.serenity_context(),
+                        serenity::CreateInteractionResponseFollowup::default()
+                            .content("Couldn't break that down right now."),
+                    )
+                    .await?;
+                }
+            }
+            reply
+                .edit(*ctx, poise::CreateReply::default()
+                    .embed(embeds::estimate_embed(parsed, &est, league))
+                    .components(vec![]))
+                .await?;
+        }
+        None => {
+            reply
+                .edit(*ctx, poise::CreateReply::default()
+                    .embed(embeds::estimate_embed(parsed, &est, league))
+                    .components(vec![]))
                 .await?;
         }
     }
