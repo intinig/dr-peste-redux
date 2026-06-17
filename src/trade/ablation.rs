@@ -284,6 +284,7 @@ mod tests {
                 })
                 .collect(),
             misc: MiscFilters::default(),
+            equipment: vec![],
         }
     }
 
@@ -341,6 +342,7 @@ mod tests {
                 },
             ],
             misc: MiscFilters::default(),
+            equipment: vec![],
         }
     }
 
@@ -417,6 +419,7 @@ mod tests {
             type_line: None,
             stats: vec![],
             misc: MiscFilters::default(),
+            equipment: vec![],
         };
         let url = trade_url(&q);
         assert!(

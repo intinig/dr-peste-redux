@@ -18,6 +18,9 @@ pub struct ParsedItem {
     pub item_level: Option<u32>,
     pub quality: Option<u32>,
     pub corrupted: bool,
+    pub energy_shield: Option<u32>,
+    pub armour: Option<u32>,
+    pub evasion: Option<u32>,
     pub implicits: Vec<ItemStat>,
     pub enchants: Vec<ItemStat>,
     pub runes: Vec<ItemStat>,
@@ -157,6 +160,9 @@ pub fn parse(text: &str) -> Option<ParsedItem> {
     let item_level = labeled_u32(&lines, "Item Level:");
     let quality = labeled_u32(&lines, "Quality:");
     let corrupted = lines.contains(&"Corrupted");
+    let energy_shield = labeled_u32(&lines, "Energy Shield:");
+    let armour = labeled_u32(&lines, "Armour:");
+    let evasion = labeled_u32(&lines, "Evasion:");
 
     let mut implicits = Vec::new();
     let mut enchants = Vec::new();
@@ -191,6 +197,9 @@ pub fn parse(text: &str) -> Option<ParsedItem> {
         item_level,
         quality,
         corrupted,
+        energy_shield,
+        armour,
+        evasion,
         implicits,
         enchants,
         runes,
@@ -316,5 +325,6 @@ mod tests {
             "{raws:?}"
         );
         assert!(!raws.iter().any(|r| r.contains("Requires")), "{raws:?}");
+        assert_eq!(p.energy_shield, Some(78));
     }
 }

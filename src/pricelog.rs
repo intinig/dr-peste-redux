@@ -50,6 +50,7 @@ mod tests {
                 type_line: Some("Sapphire Ring".into()),
                 stats: vec![],
                 misc: MiscFilters::default(),
+                equipment: vec![],
             },
             listing_count: 7,
             typical_divine: typical,

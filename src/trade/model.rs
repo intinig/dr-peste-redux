@@ -63,6 +63,13 @@ pub struct MiscFilters {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct EquipFilter {
+    pub key: String,
+    pub min: Option<f64>,
+    pub max: Option<f64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct TradeQuery {
     pub league: String,
     /// trade2 category, e.g. "weapon.staff".
@@ -71,6 +78,7 @@ pub struct TradeQuery {
     pub type_line: Option<String>,
     pub stats: Vec<StatFilter>,
     pub misc: MiscFilters,
+    pub equipment: Vec<EquipFilter>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

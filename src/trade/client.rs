@@ -351,6 +351,7 @@ mod tests {
             type_line: Some("Sapphire Ring".into()),
             stats: vec![],
             misc: MiscFilters::default(),
+            equipment: vec![],
         };
         let resp = client.search(&q).await.unwrap();
         assert!(resp.total > 0);
