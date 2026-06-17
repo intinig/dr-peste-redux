@@ -2,7 +2,9 @@ mod config;
 mod discord;
 mod itemtext;
 mod poeninja;
+mod pricelog;
 mod store;
+mod trade;
 
 use std::time::Duration;
 
