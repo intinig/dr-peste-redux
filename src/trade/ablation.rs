@@ -22,8 +22,9 @@ pub trait Comparables {
 const PROBE_CEILING: usize = 16;
 
 /// Searches + fetches up to `limit` cheapest listings. If fewer than `limit`
-/// are found, relaxes the query (drops the last stat filter) and retries, up to
-/// `max_relax` times. Returns whatever it has (possibly empty).
+/// are found, relaxes the query (drops the last stat filter, then the last
+/// equipment band) and retries, up to `max_relax` times. Returns whatever it
+/// has (possibly empty).
 pub async fn gather_comparables<A: TradeApi + ?Sized>(
     api: &A,
     query: &TradeQuery,
@@ -41,10 +42,16 @@ pub async fn gather_comparables<A: TradeApi + ?Sized>(
                 .partial_cmp(&b.price_divine)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        if listings.len() >= limit || relaxations >= max_relax || q.stats.is_empty() {
+        let exhausted = q.stats.is_empty() && q.equipment.is_empty();
+        if listings.len() >= limit || relaxations >= max_relax || exhausted {
             return Ok(listings);
         }
-        q.stats.pop(); // relax the loosest-to-add constraint
+        // Relax the loosest constraint: stat filters first, then equipment bands.
+        if !q.stats.is_empty() {
+            q.stats.pop();
+        } else {
+            q.equipment.pop();
+        }
         relaxations += 1;
     }
 }
@@ -253,7 +260,7 @@ mod tests {
     impl TradeApi for FakeApi {
         async fn search(&self, q: &TradeQuery) -> anyhow::Result<SearchResponse> {
             self.seen.lock().unwrap().push(q.clone());
-            let n = 1 + (3usize.saturating_sub(q.stats.len())) * 4;
+            let n = 1 + (3usize.saturating_sub(q.stats.len() + q.equipment.len())) * 4;
             let hashes = (0..n).map(|i| format!("h{i}")).collect::<Vec<_>>();
             Ok(SearchResponse {
                 id: "qid".into(),
@@ -284,6 +291,7 @@ mod tests {
                 })
                 .collect(),
             misc: MiscFilters::default(),
+            equipment: vec![],
         }
     }
 
@@ -295,6 +303,34 @@ mod tests {
         // 3 stats → 1 listing (< k=5). Must relax (drop a stat) until ≥ 5.
         let got = gather_comparables(&api, &q_with(3), 5, 3).await.unwrap();
         assert!(got.len() >= 5);
+    }
+
+    #[tokio::test]
+    async fn relaxes_equipment_when_stats_exhausted() {
+        // No stat filters, only equipment bands: relaxation must drop equipment
+        // (otherwise a too-tight defence band returns a thin result).
+        let api = FakeApi {
+            seen: Mutex::new(vec![]),
+        };
+        let q = TradeQuery {
+            league: "Standard".into(),
+            category: None,
+            type_line: Some("Sandsworn Sandals".into()),
+            stats: vec![],
+            misc: MiscFilters::default(),
+            equipment: (0..3)
+                .map(|i| crate::trade::model::EquipFilter {
+                    key: format!("e{i}"),
+                    min: Some(50.0),
+                    max: None,
+                })
+                .collect(),
+        };
+        let got = gather_comparables(&api, &q, 5, 3).await.unwrap();
+        assert!(
+            got.len() >= 5,
+            "should relax equipment bands to reach the limit"
+        );
     }
 
     /// Fake high-level Comparables: maps a query to a fixed price based on which
@@ -341,6 +377,7 @@ mod tests {
                 },
             ],
             misc: MiscFilters::default(),
+            equipment: vec![],
         }
     }
 
@@ -417,6 +454,7 @@ mod tests {
             type_line: None,
             stats: vec![],
             misc: MiscFilters::default(),
+            equipment: vec![],
         };
         let url = trade_url(&q);
         assert!(

@@ -18,6 +18,9 @@ pub struct ParsedItem {
     pub item_level: Option<u32>,
     pub quality: Option<u32>,
     pub corrupted: bool,
+    pub energy_shield: Option<u32>,
+    pub armour: Option<u32>,
+    pub evasion: Option<u32>,
     pub implicits: Vec<ItemStat>,
     pub enchants: Vec<ItemStat>,
     pub runes: Vec<ItemStat>,
@@ -87,7 +90,7 @@ fn is_meta_line(l: &str) -> bool {
         "Stack Size:",
         "Energy Shield:",
         "Armour:",
-        "Evasion:",
+        "Evasion Rating:",
         "Str", // Strength/Dexterity/Intelligence attribute requirements
         "Dex",
         "Int",
@@ -157,6 +160,9 @@ pub fn parse(text: &str) -> Option<ParsedItem> {
     let item_level = labeled_u32(&lines, "Item Level:");
     let quality = labeled_u32(&lines, "Quality:");
     let corrupted = lines.contains(&"Corrupted");
+    let energy_shield = labeled_u32(&lines, "Energy Shield:");
+    let armour = labeled_u32(&lines, "Armour:");
+    let evasion = labeled_u32(&lines, "Evasion Rating:");
 
     let mut implicits = Vec::new();
     let mut enchants = Vec::new();
@@ -191,6 +197,9 @@ pub fn parse(text: &str) -> Option<ParsedItem> {
         item_level,
         quality,
         corrupted,
+        energy_shield,
+        armour,
+        evasion,
         implicits,
         enchants,
         runes,
@@ -316,5 +325,15 @@ mod tests {
             "{raws:?}"
         );
         assert!(!raws.iter().any(|r| r.contains("Requires")), "{raws:?}");
+        assert_eq!(p.energy_shield, Some(78));
+    }
+
+    #[test]
+    fn parses_evasion_rating_label() {
+        let item = "Item Class: Boots\nRarity: Rare\nFoo\nLeather Boots\n--------\nEvasion Rating: 320\n--------\nItem Level: 80\n--------\n+40 to maximum Life\n";
+        let p = parse(item).unwrap();
+        assert_eq!(p.evasion, Some(320));
+        // the "Evasion Rating:" property line is not treated as a mod
+        assert!(p.explicits.iter().all(|s| !s.raw.contains("Evasion")));
     }
 }

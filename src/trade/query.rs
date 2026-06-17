@@ -4,7 +4,7 @@
 use serde_json::{json, Value};
 
 use crate::itemtext::ParsedItem;
-use crate::trade::model::{MiscFilters, StatFilter, TradeQuery};
+use crate::trade::model::{EquipFilter, MiscFilters, StatFilter, TradeQuery};
 use crate::trade::pseudo::PseudoMap;
 use crate::trade::stats::{StatCatalog, StatGroup};
 
@@ -111,6 +111,22 @@ pub fn build_baseline(
         }
     }
 
+    let mut equipment = Vec::new();
+    for (key, val) in [
+        ("es", item.energy_shield),
+        ("ar", item.armour),
+        ("ev", item.evasion),
+    ] {
+        if let Some(v) = val {
+            let (min, max) = band(v as f64);
+            equipment.push(EquipFilter {
+                key: key.to_string(),
+                min,
+                max,
+            });
+        }
+    }
+
     TradeQuery {
         league: league.to_string(),
         category: None, // category inference deferred (needs a base→category table)
@@ -121,6 +137,7 @@ pub fn build_baseline(
             quality_min: item.quality,
             corrupted: Some(item.corrupted),
         },
+        equipment,
     }
 }
 
@@ -160,12 +177,25 @@ pub fn to_payload(q: &TradeQuery) -> Value {
         misc_filters["corrupted"] = json!({ "option": c });
     }
 
+    let mut equip = serde_json::Map::new();
+    for e in &q.equipment {
+        let mut value = json!({});
+        if let Some(m) = e.min {
+            value["min"] = json!(m);
+        }
+        if let Some(m) = e.max {
+            value["max"] = json!(m);
+        }
+        equip.insert(e.key.clone(), value);
+    }
+
     let mut query = json!({
         "status": { "option": "online" },
         "stats": [ { "type": "and", "filters": stat_filters } ],
         "filters": {
             "type_filters": { "filters": type_filters },
             "misc_filters": { "filters": misc_filters },
+            "equipment_filters": { "filters": equip },
         }
     });
     if let Some(t) = &q.type_line {
@@ -180,8 +210,6 @@ mod tests {
     use super::*;
     use crate::itemtext::{ItemStat, ParsedItem, Rarity};
     use crate::trade::pseudo::PseudoMap;
-    use crate::trade::stats::StatCatalog;
-
     fn ring() -> ParsedItem {
         ParsedItem {
             rarity: Rarity::Rare,
@@ -191,6 +219,9 @@ mod tests {
             item_level: Some(80),
             quality: None,
             corrupted: false,
+            energy_shield: None,
+            armour: None,
+            evasion: None,
             implicits: vec![],
             enchants: vec![],
             runes: vec![],
@@ -224,6 +255,9 @@ mod tests {
             item_level: Some(80),
             quality: None,
             corrupted: false,
+            energy_shield: None,
+            armour: None,
+            evasion: None,
             implicits: vec![],
             enchants: vec![],
             runes: vec![],
@@ -326,5 +360,114 @@ mod tests {
             .iter()
             .any(|s| s.id == "pseudo.pseudo_total_elemental_resistance"));
         assert!(!q.stats.iter().any(|s| s.id == "explicit.stat_3372524247"));
+    }
+
+    #[test]
+    fn energy_shield_produces_banded_equip_filter() {
+        let item = ParsedItem {
+            rarity: Rarity::Rare,
+            name: "Kraken Slippers".into(),
+            base_type: Some("Sandsworn Sandals".into()),
+            item_class: Some("Boots".into()),
+            item_level: Some(83),
+            quality: None,
+            corrupted: false,
+            energy_shield: Some(78),
+            armour: None,
+            evasion: None,
+            implicits: vec![],
+            enchants: vec![],
+            runes: vec![],
+            explicits: vec![],
+        };
+        let q = build_baseline(
+            &item,
+            &PseudoMap::load(),
+            &StatCatalog::default(),
+            "Standard",
+        );
+        let es = q.equipment.iter().find(|e| e.key == "es").unwrap();
+        // band(78): lo = round(0.9 * 78) = round(70.2) = 70
+        //           hi = round(1.4 * 78) = round(109.2) = 109
+        assert_eq!(es.min, Some(70.0));
+        assert_eq!(es.max, Some(109.0));
+        assert!(q.equipment.iter().all(|e| e.key != "ar"));
+        assert!(q.equipment.iter().all(|e| e.key != "ev"));
+    }
+
+    #[test]
+    fn payload_includes_equipment_filters_for_es() {
+        let item = ParsedItem {
+            rarity: Rarity::Rare,
+            name: "Kraken Slippers".into(),
+            base_type: Some("Sandsworn Sandals".into()),
+            item_class: Some("Boots".into()),
+            item_level: Some(83),
+            quality: None,
+            corrupted: false,
+            energy_shield: Some(78),
+            armour: None,
+            evasion: None,
+            implicits: vec![],
+            enchants: vec![],
+            runes: vec![],
+            explicits: vec![],
+        };
+        let q = build_baseline(
+            &item,
+            &PseudoMap::load(),
+            &StatCatalog::default(),
+            "Standard",
+        );
+        let payload = to_payload(&q);
+        let es_min = &payload["query"]["filters"]["equipment_filters"]["filters"]["es"]["min"];
+        assert_eq!(*es_min, serde_json::json!(70.0));
+    }
+
+    #[test]
+    fn rune_resistance_folds_into_pseudo_total_elemental_resistance() {
+        // Boots: cold-rune (+18), lightning explicit (+34), fire explicit (+39).
+        // Total elemental = 18+34+39 = 91; band lo = round(0.9*91) = 82.
+        let item = ParsedItem {
+            rarity: Rarity::Rare,
+            name: "Kraken Slippers".into(),
+            base_type: Some("Sandsworn Sandals".into()),
+            item_class: Some("Boots".into()),
+            item_level: Some(83),
+            quality: None,
+            corrupted: false,
+            energy_shield: None,
+            armour: None,
+            evasion: None,
+            implicits: vec![],
+            enchants: vec![],
+            runes: vec![ItemStat {
+                raw: "+18% to Cold Resistance".into(),
+                value: Some(18.0),
+            }],
+            explicits: vec![
+                ItemStat {
+                    raw: "+34% to Lightning Resistance".into(),
+                    value: Some(34.0),
+                },
+                ItemStat {
+                    raw: "+39% to Fire Resistance".into(),
+                    value: Some(39.0),
+                },
+            ],
+        };
+        let q = build_baseline(
+            &item,
+            &PseudoMap::load(),
+            &StatCatalog::default(),
+            "Standard",
+        );
+        let ele = q
+            .stats
+            .iter()
+            .find(|s| s.id == "pseudo.pseudo_total_elemental_resistance")
+            .expect("elemental resistance pseudo filter present");
+        // round(0.9 * 91) = round(81.9) = 82
+        assert_eq!(ele.min, Some(82.0), "rune resistance must fold into pseudo");
     }
 }
