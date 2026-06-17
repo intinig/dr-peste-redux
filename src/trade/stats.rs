@@ -30,12 +30,30 @@ impl StatGroup {
 
 /// Replaces each signed number token (e.g. "+40", "-10", "12.5") with `#` and
 /// collapses whitespace, so a clipboard line matches a catalog template.
+///
+/// Advanced Mode shows rolls as `current(min-max)` (e.g. "16(15-18)%"); the
+/// `(min-max)` range is dropped so it normalizes to `#%` (matching the catalog)
+/// rather than `#(#-#)%` (which would never match).
 pub fn normalize(text: &str) -> String {
     let chars: Vec<char> = text.chars().collect();
     let mut out = String::new();
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i];
+        // Drop a value-range annotation like "(15-18)" entirely.
+        if c == '(' {
+            if let Some(rel) = chars[i + 1..].iter().position(|&ch| ch == ')') {
+                let inner = &chars[i + 1..i + 1 + rel];
+                if !inner.is_empty()
+                    && inner
+                        .iter()
+                        .all(|&ch| ch.is_ascii_digit() || matches!(ch, '-' | '–' | '.' | '+' | ' '))
+                {
+                    i += rel + 2;
+                    continue;
+                }
+            }
+        }
         let starts_num = c.is_ascii_digit()
             || ((c == '+' || c == '-') && i + 1 < chars.len() && chars[i + 1].is_ascii_digit());
         if starts_num {
@@ -189,6 +207,33 @@ mod tests {
         assert_eq!(
             normalize("Adds 5 to 12 Fire Damage"),
             "Adds # to # Fire Damage"
+        );
+    }
+
+    #[test]
+    fn normalize_strips_value_ranges() {
+        // Advanced Mode shows "current(min-max)"; the range must drop so the
+        // line matches the catalog "#" template (not "#(#-#)").
+        assert_eq!(
+            normalize("16(15-18)% increased Rarity of Items found"),
+            "#% increased Rarity of Items found"
+        );
+        assert_eq!(
+            normalize("+34(31-35)% to Lightning Resistance"),
+            "#% to Lightning Resistance"
+        );
+    }
+
+    #[test]
+    fn matches_ranged_advanced_mode_mod() {
+        let c = cat();
+        assert_eq!(
+            c.match_stat(
+                "16(15-18)% increased Rarity of Items found",
+                StatGroup::Explicit
+            )
+            .as_deref(),
+            Some("explicit.stat_rarity")
         );
     }
 
