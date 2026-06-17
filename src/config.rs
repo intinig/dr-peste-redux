@@ -6,6 +6,7 @@ pub struct Config {
     pub guild_id: u64,
     pub poll_interval_mins: u64,
     pub min_volume: f64,
+    pub poe_sessid: Option<String>,
 }
 
 impl Config {
@@ -34,11 +35,13 @@ impl Config {
             Some(v) => v.parse::<f64>().context("MIN_VOLUME must be a number")?,
             None => 0.0,
         };
+        let poe_sessid = get("POE_SESSID").filter(|s| !s.is_empty());
         Ok(Self {
             discord_token,
             guild_id,
             poll_interval_mins,
             min_volume,
+            poe_sessid,
         })
     }
 }
@@ -108,5 +111,24 @@ mod tests {
             ("POLL_INTERVAL_MINS", "0"),
         ]))
         .is_err());
+    }
+
+    #[test]
+    fn reads_optional_poe_sessid() {
+        let cfg = Config::from_lookup(|k| match k {
+            "DISCORD_TOKEN" => Some("t".into()),
+            "GUILD_ID" => Some("1".into()),
+            "POE_SESSID" => Some("abc".into()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(cfg.poe_sessid.as_deref(), Some("abc"));
+        let cfg2 = Config::from_lookup(|k| match k {
+            "DISCORD_TOKEN" => Some("t".into()),
+            "GUILD_ID" => Some("1".into()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(cfg2.poe_sessid, None);
     }
 }

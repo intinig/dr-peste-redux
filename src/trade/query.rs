@@ -1,0 +1,330 @@
+//! Builds a `TradeQuery` from a parsed item (pseudo-preferred for fungible
+//! groups) and serializes it to the trade2 search payload.
+
+use serde_json::{json, Value};
+
+use crate::itemtext::ParsedItem;
+use crate::trade::model::{MiscFilters, StatFilter, TradeQuery};
+use crate::trade::pseudo::PseudoMap;
+use crate::trade::stats::{StatCatalog, StatGroup};
+
+/// Band width as a fraction of the roll.
+const BAND_K: f64 = 0.5;
+/// Your roll sits at this percentile of the band (0.2 = bottom 20%).
+const BAND_PCTL: f64 = 0.2;
+
+/// Search band `[min, max]` around roll `v`, with `v` at the BAND_PCTL position.
+/// With BAND_K=0.5, BAND_PCTL=0.2 → `[0.9·v, 1.4·v]`.
+fn band(v: f64) -> (Option<f64>, Option<f64>) {
+    let lo = (v * (1.0 - BAND_PCTL * BAND_K)).round();
+    let hi = (v * (1.0 + (1.0 - BAND_PCTL) * BAND_K)).round();
+    (Some(lo), Some(hi))
+}
+
+pub fn build_baseline(
+    item: &ParsedItem,
+    pseudo: &PseudoMap,
+    catalog: &StatCatalog,
+    league: &str,
+) -> TradeQuery {
+    let all_stats: Vec<_> = item
+        .implicits
+        .iter()
+        .chain(&item.enchants)
+        .chain(&item.runes)
+        .chain(&item.explicits)
+        .cloned()
+        .collect();
+
+    let mut stats: Vec<StatFilter> = Vec::new();
+
+    // Pseudo aggregates with a positive total become min-bounded filters.
+    let resolved: Vec<_> = pseudo.resolve(&all_stats);
+
+    // When both pseudo_total_elemental_resistance and pseudo_total_resistance
+    // resolve to positive totals they describe overlapping lines — emitting both
+    // makes each single-drop delta ≈ 0 and breaks the ablation breakdown.
+    // Keep only one: prefer pseudo_total_resistance when its total is strictly
+    // greater (i.e. chaos resistance contributes), otherwise keep
+    // pseudo_total_elemental_resistance and drop the total-resistance one.
+    let ele_total = resolved
+        .iter()
+        .find(|ps| ps.id == "pseudo.pseudo_total_elemental_resistance")
+        .map(|ps| ps.total);
+    let all_total = resolved
+        .iter()
+        .find(|ps| ps.id == "pseudo.pseudo_total_resistance")
+        .map(|ps| ps.total);
+    let drop_total_resistance = match (ele_total, all_total) {
+        (Some(ele), Some(all)) => all <= ele, // no chaos contribution → keep elemental
+        _ => false,
+    };
+
+    for ps in &resolved {
+        if ps.total > 0.0 {
+            if ps.id == "pseudo.pseudo_total_resistance" && drop_total_resistance {
+                continue;
+            }
+            if ps.id == "pseudo.pseudo_total_elemental_resistance"
+                && !drop_total_resistance
+                && ele_total.is_some()
+                && all_total.is_some()
+            {
+                continue;
+            }
+            let (min, max) = band(ps.total);
+            stats.push(StatFilter {
+                id: ps.id.clone(),
+                label: ps.label.clone(),
+                min,
+                max,
+            });
+        }
+    }
+
+    // Individual (non-fungible) mods: map each to its trade2 stat id and add a
+    // banded filter. Mods already covered by a pseudo aggregate are skipped to
+    // avoid double-constraining; unmatched mods are logged and skipped.
+    let buckets = [
+        (&item.implicits, StatGroup::Implicit),
+        (&item.enchants, StatGroup::Enchant),
+        (&item.runes, StatGroup::Rune),
+        (&item.explicits, StatGroup::Explicit),
+    ];
+    for (mods, group) in buckets {
+        for m in mods {
+            if pseudo.covers(&m.raw) {
+                continue;
+            }
+            match catalog.match_stat(&m.raw, group) {
+                Some(id) => {
+                    let (min, max) = m.value.map(band).unwrap_or((None, None));
+                    stats.push(StatFilter {
+                        id,
+                        label: m.raw.clone(),
+                        min,
+                        max,
+                    });
+                }
+                None => tracing::debug!(item_mod = %m.raw, "no trade2 stat match; skipping filter"),
+            }
+        }
+    }
+
+    TradeQuery {
+        league: league.to_string(),
+        category: None, // category inference deferred (needs a base→category table)
+        type_line: item.base_type.clone(),
+        stats,
+        misc: MiscFilters {
+            item_level_min: item.item_level,
+            quality_min: item.quality,
+            corrupted: Some(item.corrupted),
+        },
+    }
+}
+
+/// Serializes a `TradeQuery` to the trade2 search request body.
+///
+/// Assumption (confirmed by the live smoke test in Task 7): trade2 expects
+/// `{ query: { status, type, filters: { type_filters, misc_filters }, stats }, sort }`.
+pub fn to_payload(q: &TradeQuery) -> Value {
+    let stat_filters: Vec<Value> = q
+        .stats
+        .iter()
+        .map(|s| {
+            let mut value = json!({});
+            if let Some(m) = s.min {
+                value["min"] = json!(m);
+            }
+            if let Some(m) = s.max {
+                value["max"] = json!(m);
+            }
+            json!({ "id": s.id, "value": value })
+        })
+        .collect();
+
+    let mut type_filters = json!({});
+    if let Some(c) = &q.category {
+        type_filters["category"] = json!({ "option": c });
+    }
+    if let Some(min) = q.misc.item_level_min {
+        type_filters["ilvl"] = json!({ "min": min });
+    }
+    if let Some(min) = q.misc.quality_min {
+        type_filters["quality"] = json!({ "min": min });
+    }
+
+    let mut misc_filters = json!({});
+    if let Some(c) = q.misc.corrupted {
+        misc_filters["corrupted"] = json!({ "option": c });
+    }
+
+    let mut query = json!({
+        "status": { "option": "online" },
+        "stats": [ { "type": "and", "filters": stat_filters } ],
+        "filters": {
+            "type_filters": { "filters": type_filters },
+            "misc_filters": { "filters": misc_filters },
+        }
+    });
+    if let Some(t) = &q.type_line {
+        query["type"] = json!(t);
+    }
+
+    json!({ "query": query, "sort": { "price": "asc" } })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::itemtext::{ItemStat, ParsedItem, Rarity};
+    use crate::trade::pseudo::PseudoMap;
+    use crate::trade::stats::StatCatalog;
+
+    fn ring() -> ParsedItem {
+        ParsedItem {
+            rarity: Rarity::Rare,
+            name: "Woe Coil".into(),
+            base_type: Some("Sapphire Ring".into()),
+            item_class: Some("Rings".into()),
+            item_level: Some(80),
+            quality: None,
+            corrupted: false,
+            implicits: vec![],
+            enchants: vec![],
+            runes: vec![],
+            explicits: vec![
+                ItemStat {
+                    raw: "+40 to maximum Life".into(),
+                    value: Some(40.0),
+                },
+                ItemStat {
+                    raw: "+32% to Fire Resistance".into(),
+                    value: Some(32.0),
+                },
+                ItemStat {
+                    raw: "+18% to Lightning Resistance".into(),
+                    value: Some(18.0),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn fire_and_lightning_only_emits_elemental_not_total_resistance() {
+        // A ring with only fire + lightning resistance (no chaos) should produce
+        // exactly ONE resistance stat filter — the elemental one — not both
+        // pseudo_total_elemental_resistance AND pseudo_total_resistance.
+        let item = ParsedItem {
+            rarity: Rarity::Rare,
+            name: "Woe Coil".into(),
+            base_type: Some("Sapphire Ring".into()),
+            item_class: Some("Rings".into()),
+            item_level: Some(80),
+            quality: None,
+            corrupted: false,
+            implicits: vec![],
+            enchants: vec![],
+            runes: vec![],
+            explicits: vec![
+                ItemStat {
+                    raw: "+32% to Fire Resistance".into(),
+                    value: Some(32.0),
+                },
+                ItemStat {
+                    raw: "+18% to Lightning Resistance".into(),
+                    value: Some(18.0),
+                },
+            ],
+        };
+        let q = build_baseline(
+            &item,
+            &PseudoMap::load(),
+            &StatCatalog::default(),
+            "Standard",
+        );
+        let res_filters: Vec<_> = q
+            .stats
+            .iter()
+            .filter(|s| {
+                s.id == "pseudo.pseudo_total_elemental_resistance"
+                    || s.id == "pseudo.pseudo_total_resistance"
+            })
+            .collect();
+        assert_eq!(
+            res_filters.len(),
+            1,
+            "expected exactly one resistance filter, got: {:?}",
+            res_filters.iter().map(|s| &s.id).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            res_filters[0].id, "pseudo.pseudo_total_elemental_resistance",
+            "no chaos → should keep elemental filter"
+        );
+    }
+
+    #[test]
+    fn baseline_prefers_pseudo_resistance_over_individual_lines() {
+        let q = build_baseline(
+            &ring(),
+            &PseudoMap::load(),
+            &StatCatalog::default(),
+            "Standard",
+        );
+        assert_eq!(q.league, "Standard");
+        assert_eq!(q.type_line.as_deref(), Some("Sapphire Ring"));
+        let ele = q
+            .stats
+            .iter()
+            .find(|s| s.id == "pseudo.pseudo_total_elemental_resistance")
+            .unwrap();
+        assert_eq!(ele.min, Some(45.0)); // round(0.9 * 50) = 45
+        assert_eq!(ele.max, Some(70.0)); // round(1.4 * 50) = 70
+        assert!(!q.stats.iter().any(|s| s.label.contains("Fire Resistance")));
+        assert!(q
+            .stats
+            .iter()
+            .any(|s| s.id == "pseudo.pseudo_total_life" && s.min == Some(36.0)));
+        // round(0.9 * 40) = 36
+    }
+
+    #[test]
+    fn payload_has_status_type_and_sort() {
+        let q = build_baseline(
+            &ring(),
+            &PseudoMap::load(),
+            &StatCatalog::default(),
+            "Standard",
+        );
+        let payload = to_payload(&q);
+        assert_eq!(payload["query"]["status"]["option"], "online");
+        assert_eq!(payload["query"]["type"], "Sapphire Ring");
+        assert_eq!(payload["sort"]["price"], "asc");
+    }
+
+    #[test]
+    fn baseline_emits_individual_filter_for_matched_nonpseudo_mod() {
+        let catalog = StatCatalog::from_json(include_str!("fixtures/stats_sample.json")).unwrap();
+        let mut item = ring(); // life + fire res + lightning res
+        item.explicits.push(ItemStat {
+            raw: "80% increased Spell Damage".into(),
+            value: Some(80.0),
+        });
+        let q = build_baseline(&item, &PseudoMap::load(), &catalog, "Standard");
+        // spell damage is non-pseudo → individual banded filter (round(0.9*80)=72, round(1.4*80)=112)
+        let sd = q
+            .stats
+            .iter()
+            .find(|s| s.id == "explicit.stat_spell_dmg")
+            .unwrap();
+        assert_eq!(sd.min, Some(72.0));
+        assert_eq!(sd.max, Some(112.0));
+        // resists stay collapsed into the pseudo, NOT individual filters
+        assert!(q
+            .stats
+            .iter()
+            .any(|s| s.id == "pseudo.pseudo_total_elemental_resistance"));
+        assert!(!q.stats.iter().any(|s| s.id == "explicit.stat_3372524247"));
+    }
+}

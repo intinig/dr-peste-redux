@@ -90,15 +90,15 @@ pub fn farm<'a>(
 pub enum MatchOutcome<'a> {
     Found(&'a PricedItem),
     Suggestions(Vec<&'a PricedItem>),
-    NotTracked,
+    Rare,
     NotFound,
 }
 
-/// Routes a parsed pasted item to a price match. Magic/Rare gear is not priced
-/// by poe.ninja and returns NotTracked.
+/// Routes a parsed pasted item to a price match. Magic/Rare gear is routed to
+/// the trade pricer and returns `Rare`.
 pub fn route<'a>(items: &'a [PricedItem], parsed: &ParsedItem) -> MatchOutcome<'a> {
     if matches!(parsed.rarity, Rarity::Magic | Rarity::Rare) {
-        return MatchOutcome::NotTracked;
+        return MatchOutcome::Rare;
     }
     if let Some(found) = find_exact(items, &parsed.name) {
         return MatchOutcome::Found(found);
@@ -128,6 +128,22 @@ mod tests {
             change_pct: change,
             volume,
             icon_url: None,
+        }
+    }
+
+    fn parsed(rarity: Rarity, name: &str, base: Option<&str>) -> ParsedItem {
+        ParsedItem {
+            rarity,
+            name: name.into(),
+            base_type: base.map(Into::into),
+            item_class: None,
+            item_level: None,
+            quality: None,
+            corrupted: false,
+            implicits: vec![],
+            enchants: vec![],
+            runes: vec![],
+            explicits: vec![],
         }
     }
 
@@ -177,35 +193,23 @@ mod tests {
     }
 
     #[test]
-    fn route_rejects_rare_gear() {
+    fn routes_rare_to_trade_path() {
         let items = sample();
-        let parsed = ParsedItem {
-            rarity: Rarity::Rare,
-            name: "Corpse Bramble".into(),
-            base_type: Some("Vaal Regalia".into()),
-        };
-        assert!(matches!(route(&items, &parsed), MatchOutcome::NotTracked));
+        let parsed = parsed(Rarity::Rare, "Corpse Bramble", Some("Vaal Regalia"));
+        assert!(matches!(route(&items, &parsed), MatchOutcome::Rare));
     }
 
     #[test]
     fn route_finds_unique_by_name() {
         let items = sample();
-        let parsed = ParsedItem {
-            rarity: Rarity::Unique,
-            name: "The Dancing Dervish".into(),
-            base_type: Some("Scimitar".into()),
-        };
+        let parsed = parsed(Rarity::Unique, "The Dancing Dervish", Some("Scimitar"));
         assert!(matches!(route(&items, &parsed), MatchOutcome::Found(_)));
     }
 
     #[test]
     fn route_suggests_when_no_exact_match() {
         let items = sample();
-        let parsed = ParsedItem {
-            rarity: Rarity::Currency,
-            name: "Divine".into(),
-            base_type: None,
-        };
+        let parsed = parsed(Rarity::Currency, "Divine", None);
         assert!(matches!(
             route(&items, &parsed),
             MatchOutcome::Suggestions(_)

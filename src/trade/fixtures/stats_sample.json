@@ -1,0 +1,20 @@
+{ "result": [
+  { "id": "pseudo", "label": "Pseudo", "entries": [
+    { "id": "pseudo.pseudo_total_elemental_resistance", "text": "+#% total Elemental Resistance" }
+  ]},
+  { "id": "explicit", "label": "Explicit", "entries": [
+    { "id": "explicit.stat_3299347043", "text": "# to maximum Life" },
+    { "id": "explicit.stat_3372524247", "text": "#% to Fire Resistance" },
+    { "id": "explicit.stat_spell_dmg", "text": "#% increased Spell Damage" },
+    { "id": "explicit.stat_adds_fire", "text": "Adds # to # Fire Damage" }
+  ]},
+  { "id": "implicit", "label": "Implicit", "entries": [
+    { "id": "implicit.stat_mana", "text": "# to maximum Mana" }
+  ]},
+  { "id": "enchant", "label": "Enchant", "entries": [
+    { "id": "enchant.stat_rarity", "text": "#% increased Rarity of Items found" }
+  ]},
+  { "id": "rune", "label": "Augment", "entries": [
+    { "id": "rune.stat_str", "text": "# to Strength" }
+  ]}
+]}

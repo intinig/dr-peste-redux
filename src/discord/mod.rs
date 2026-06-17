@@ -4,14 +4,19 @@ pub mod help;
 pub mod paste;
 pub mod price;
 
+use std::sync::Arc;
+
 use futures::Stream;
 
 use crate::config::Config;
 use crate::store::{self, PriceStore};
+use crate::trade::client::TradeClient;
+use crate::trade::TradePricer;
 
 pub struct Data {
     pub store: PriceStore,
     pub config: Config,
+    pub pricer: Arc<TradePricer<TradeClient>>,
 }
 
 pub type Error = anyhow::Error;

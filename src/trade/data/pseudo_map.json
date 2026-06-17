@@ -1,0 +1,46 @@
+[
+  {
+    "pseudo_id": "pseudo.pseudo_total_elemental_resistance",
+    "label": "Total Elemental Resistance",
+    "patterns": [
+      { "text": "to Fire Resistance", "weight": 1 },
+      { "text": "to Cold Resistance", "weight": 1 },
+      { "text": "to Lightning Resistance", "weight": 1 },
+      { "text": "to Fire and Lightning Resistance", "weight": 2 },
+      { "text": "to Fire and Cold Resistance", "weight": 2 },
+      { "text": "to Cold and Lightning Resistance", "weight": 2 },
+      { "text": "to all Elemental Resistances", "weight": 3 }
+    ]
+  },
+  {
+    "pseudo_id": "pseudo.pseudo_total_resistance",
+    "label": "Total Resistance (incl. Chaos)",
+    "patterns": [
+      { "text": "to Fire Resistance", "weight": 1 },
+      { "text": "to Cold Resistance", "weight": 1 },
+      { "text": "to Lightning Resistance", "weight": 1 },
+      { "text": "to Fire and Lightning Resistance", "weight": 2 },
+      { "text": "to Fire and Cold Resistance", "weight": 2 },
+      { "text": "to Cold and Lightning Resistance", "weight": 2 },
+      { "text": "to all Elemental Resistances", "weight": 3 },
+      { "text": "to Chaos Resistance", "weight": 1 }
+    ]
+  },
+  {
+    "pseudo_id": "pseudo.pseudo_total_life",
+    "label": "Total maximum Life",
+    "patterns": [
+      { "text": "to maximum Life", "weight": 1 }
+    ]
+  },
+  {
+    "pseudo_id": "pseudo.pseudo_total_attributes",
+    "label": "Total Attributes",
+    "patterns": [
+      { "text": "to Strength", "weight": 1 },
+      { "text": "to Dexterity", "weight": 1 },
+      { "text": "to Intelligence", "weight": 1 },
+      { "text": "to all Attributes", "weight": 3 }
+    ]
+  }
+]
