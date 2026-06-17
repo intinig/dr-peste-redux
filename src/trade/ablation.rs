@@ -5,7 +5,10 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::trade::client::TradeApi;
-use crate::trade::model::{Listing, TradeQuery};
+use crate::trade::model::{
+    AblationKind, Breakdown, Confidence, Contribution, Listing, PriceEstimate, SynergyNote,
+    TradeQuery,
+};
 
 /// High-level seam the pricer depends on. `TradeClient` implements it via
 /// `gather_comparables`; tests fake it directly.
@@ -38,11 +41,124 @@ pub async fn gather_comparables<A: TradeApi + ?Sized>(
     }
 }
 
+/// Cheapest, typical (low-percentile), and high prices over the comparables,
+/// all in divine. `typical` is the cheapest (asking-price floor) — the most
+/// defensible single number for "what it sells for".
+pub async fn estimate<C: Comparables + ?Sized>(
+    c: &C,
+    query: &TradeQuery,
+    limit: usize,
+) -> Result<PriceEstimate> {
+    let listings = c.comparables(query, limit).await?;
+    Ok(estimate_from(&listings))
+}
+
+fn estimate_from(listings: &[Listing]) -> PriceEstimate {
+    let mut prices: Vec<f64> = listings.iter().map(|l| l.price_divine).collect();
+    prices.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = prices.len();
+    let (low, typical, high) = if n == 0 {
+        (0.0, 0.0, 0.0)
+    } else {
+        let low = prices[0];
+        let typical = prices[0];
+        let high = prices[(n * 3 / 4).min(n - 1)]; // ~75th percentile
+        (low, typical, high)
+    };
+    PriceEstimate {
+        low,
+        typical,
+        high,
+        listing_count: n,
+        confidence: Confidence::from_count(n),
+    }
+}
+
+/// Ablate the top-`k` stat filters (single-drop), ranked by delta, plus one
+/// pairwise probe on the top two to flag synergy.
+pub async fn breakdown<C: Comparables + ?Sized>(
+    c: &C,
+    query: &TradeQuery,
+    limit: usize,
+    k: usize,
+) -> Result<Breakdown> {
+    let baseline = estimate(c, query, limit).await?;
+
+    let mut ranked: Vec<Contribution> = Vec::new();
+    for (i, sf) in query.stats.iter().enumerate() {
+        let mut q = query.clone();
+        q.stats.remove(i);
+        let without = estimate(c, &q, limit).await?;
+        ranked.push(Contribution {
+            characteristic: sf.label.clone(),
+            kind: AblationKind::Drop,
+            delta_divine: baseline.typical - without.typical,
+        });
+    }
+    ranked.sort_by(|a, b| {
+        b.delta_divine
+            .partial_cmp(&a.delta_divine)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    ranked.truncate(k.max(1));
+
+    // Pairwise synergy on the top two (by name → find their indices in query).
+    let synergy = if ranked.len() >= 2 {
+        let a_label = ranked[0].characteristic.clone();
+        let b_label = ranked[1].characteristic.clone();
+        let a_idx = query.stats.iter().position(|s| s.label == a_label);
+        let b_idx = query.stats.iter().position(|s| s.label == b_label);
+        match (a_idx, b_idx) {
+            (Some(ai), Some(bi)) if ai != bi => {
+                let mut q = query.clone();
+                // remove higher index first to keep the other valid
+                let (hi, lo) = if ai > bi { (ai, bi) } else { (bi, ai) };
+                q.stats.remove(hi);
+                q.stats.remove(lo);
+                let without_both = estimate(c, &q, limit).await?;
+                let drop_both = baseline.typical - without_both.typical;
+                let sum_individual = ranked[0].delta_divine + ranked[1].delta_divine;
+                // Super-additive synergy: removing both costs more than the sum
+                // of removing each individually.
+                let extra = sum_individual - drop_both;
+                if extra > f64::EPSILON {
+                    Some(SynergyNote {
+                        a: a_label,
+                        b: b_label,
+                        extra_divine: extra,
+                    })
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+
+    Ok(Breakdown {
+        baseline,
+        ranked,
+        synergy,
+        trade_url: trade_url(query),
+    })
+}
+
+/// Human-clickable trade2 search URL for the item's league (a fresh search; the
+/// API search id is ephemeral, so we link to the site search page instead).
+pub fn trade_url(query: &TradeQuery) -> String {
+    format!("https://www.pathofexile.com/trade2/search/{}", query.league)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::trade::client::TradeApi;
-    use crate::trade::model::{Currency, Listing, MiscFilters, Money, SearchResponse, StatFilter, TradeQuery};
+    use crate::trade::model::{
+        AblationKind, Confidence, Currency, Listing, MiscFilters, Money, SearchResponse,
+        StatFilter, TradeQuery,
+    };
     use async_trait::async_trait;
     use std::sync::Mutex;
 
@@ -88,5 +204,58 @@ mod tests {
         // 3 stats → 1 listing (< k=5). Must relax (drop a stat) until ≥ 5.
         let got = gather_comparables(&api, &q_with(3), 5, 3).await.unwrap();
         assert!(got.len() >= 5);
+    }
+
+    /// Fake high-level Comparables: maps a query to a fixed price based on which
+    /// stat ids are present, so ablation deltas are deterministic.
+    struct FakePricer;
+
+    #[async_trait]
+    impl Comparables for FakePricer {
+        async fn comparables(&self, q: &TradeQuery, _limit: usize) -> anyhow::Result<Vec<Listing>> {
+            // base 5; +10 if "spell" present; +2 if "crit" present; +6 extra if BOTH (synergy)
+            let has_spell = q.stats.iter().any(|s| s.id.contains("spell"));
+            let has_crit = q.stats.iter().any(|s| s.id.contains("crit"));
+            let mut price = 5.0;
+            if has_spell { price += 10.0; }
+            if has_crit { price += 2.0; }
+            if has_spell && has_crit { price += 6.0; }
+            Ok(vec![listing(price); 12]) // 12 listings → High confidence
+        }
+    }
+
+    fn two_stat_query() -> TradeQuery {
+        TradeQuery {
+            league: "Standard".into(),
+            category: None,
+            type_line: Some("Expert Crackling Staff".into()),
+            stats: vec![
+                StatFilter { id: "explicit.spell".into(), label: "+to all Spell Skills".into(), min: Some(7.0), max: None },
+                StatFilter { id: "explicit.crit".into(), label: "Critical Chance".into(), min: Some(80.0), max: None },
+            ],
+            misc: MiscFilters::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn estimate_reports_typical_and_confidence() {
+        let est = estimate(&FakePricer, &two_stat_query(), 10).await.unwrap();
+        assert_eq!(est.listing_count, 12);
+        assert_eq!(est.confidence, Confidence::High);
+        // both stats present → 5+10+2+6 = 23
+        assert_eq!(est.typical, 23.0);
+    }
+
+    #[tokio::test]
+    async fn breakdown_ranks_contributions_and_flags_synergy() {
+        let bd = breakdown(&FakePricer, &two_stat_query(), 10, 2).await.unwrap();
+        // baseline 23; drop spell → 5+2 = 7 (delta 16); drop crit → 5+10 = 15 (delta 8)
+        assert_eq!(bd.ranked[0].characteristic, "+to all Spell Skills");
+        assert_eq!(bd.ranked[0].delta_divine, 16.0);
+        assert_eq!(bd.ranked[0].kind, AblationKind::Drop);
+        assert_eq!(bd.ranked[1].delta_divine, 8.0);
+        // drop-both → 5 (delta 18). individual deltas sum 16+8=24. extra = 24-18 = 6.
+        let syn = bd.synergy.unwrap();
+        assert_eq!(syn.extra_divine, 6.0);
     }
 }
