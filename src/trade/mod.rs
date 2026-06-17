@@ -17,6 +17,7 @@ use crate::trade::ablation::{estimate, Comparables};
 use crate::trade::model::{Breakdown, PriceEstimate, Probe};
 use crate::trade::pseudo::PseudoMap;
 use crate::trade::query::build_baseline;
+use crate::trade::stats::StatCatalog;
 
 /// Number of cheapest listings to consider per query.
 const LISTING_LIMIT: usize = 10;
@@ -26,27 +27,29 @@ const TOP_K: usize = 4;
 pub struct TradePricer<C: Comparables> {
     comparables: C,
     pseudo: PseudoMap,
+    catalog: StatCatalog,
     log: ProbeLog,
 }
 
 impl<C: Comparables> TradePricer<C> {
-    pub fn new(comparables: C, pseudo: PseudoMap, log: ProbeLog) -> Self {
+    pub fn new(comparables: C, pseudo: PseudoMap, catalog: StatCatalog, log: ProbeLog) -> Self {
         TradePricer {
             comparables,
             pseudo,
+            catalog,
             log,
         }
     }
 
     pub async fn price(&self, item: &ParsedItem, league: &str) -> Result<PriceEstimate> {
-        let query = build_baseline(item, &self.pseudo, league);
+        let query = build_baseline(item, &self.pseudo, &self.catalog, league);
         let est = estimate(&self.comparables, &query, LISTING_LIMIT).await?;
         self.record(&query, &est);
         Ok(est)
     }
 
     pub async fn breakdown(&self, item: &ParsedItem, league: &str) -> Result<Breakdown> {
-        let query = build_baseline(item, &self.pseudo, league);
+        let query = build_baseline(item, &self.pseudo, &self.catalog, league);
         let bd = crate::trade::ablation::breakdown(&self.comparables, &query, LISTING_LIMIT, TOP_K)
             .await?;
         self.record(&query, &bd.baseline);
@@ -118,7 +121,12 @@ mod tests {
     async fn price_logs_a_probe_and_returns_estimate() {
         let dir = tempfile::tempdir().unwrap();
         let log = crate::pricelog::ProbeLog::new(dir.path().join("p.jsonl"));
-        let pricer = TradePricer::new(Flat(12.0), crate::trade::pseudo::PseudoMap::load(), log);
+        let pricer = TradePricer::new(
+            Flat(12.0),
+            crate::trade::pseudo::PseudoMap::load(),
+            crate::trade::stats::StatCatalog::default(),
+            log,
+        );
         let est = pricer.price(&ring(), "Standard").await.unwrap();
         assert_eq!(est.typical, 12.0);
         let contents = std::fs::read_to_string(dir.path().join("p.jsonl")).unwrap();

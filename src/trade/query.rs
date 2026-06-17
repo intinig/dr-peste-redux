@@ -6,6 +6,7 @@ use serde_json::{json, Value};
 use crate::itemtext::ParsedItem;
 use crate::trade::model::{MiscFilters, StatFilter, TradeQuery};
 use crate::trade::pseudo::PseudoMap;
+use crate::trade::stats::{StatCatalog, StatGroup};
 
 /// Band width as a fraction of the roll.
 const BAND_K: f64 = 0.5;
@@ -20,7 +21,12 @@ fn band(v: f64) -> (Option<f64>, Option<f64>) {
     (Some(lo), Some(hi))
 }
 
-pub fn build_baseline(item: &ParsedItem, pseudo: &PseudoMap, league: &str) -> TradeQuery {
+pub fn build_baseline(
+    item: &ParsedItem,
+    pseudo: &PseudoMap,
+    catalog: &StatCatalog,
+    league: &str,
+) -> TradeQuery {
     let all_stats: Vec<_> = item
         .implicits
         .iter()
@@ -31,11 +37,6 @@ pub fn build_baseline(item: &ParsedItem, pseudo: &PseudoMap, league: &str) -> Tr
         .collect();
 
     let mut stats: Vec<StatFilter> = Vec::new();
-
-    // v1 note: only pseudo-mapped stats are emitted as filters here.
-    // Non-pseudo explicit mods (e.g. flat "increased Spell Damage") are not yet
-    // constrained — mapping explicit mod ids to trade2 stat ids is a documented
-    // follow-up.
 
     // Pseudo aggregates with a positive total become min-bounded filters.
     let resolved: Vec<_> = pseudo.resolve(&all_stats);
@@ -78,6 +79,35 @@ pub fn build_baseline(item: &ParsedItem, pseudo: &PseudoMap, league: &str) -> Tr
                 min,
                 max,
             });
+        }
+    }
+
+    // Individual (non-fungible) mods: map each to its trade2 stat id and add a
+    // banded filter. Mods already covered by a pseudo aggregate are skipped to
+    // avoid double-constraining; unmatched mods are logged and skipped.
+    let buckets = [
+        (&item.implicits, StatGroup::Implicit),
+        (&item.enchants, StatGroup::Enchant),
+        (&item.runes, StatGroup::Rune),
+        (&item.explicits, StatGroup::Explicit),
+    ];
+    for (mods, group) in buckets {
+        for m in mods {
+            if pseudo.covers(&m.raw) {
+                continue;
+            }
+            match catalog.match_stat(&m.raw, group) {
+                Some(id) => {
+                    let (min, max) = m.value.map(band).unwrap_or((None, None));
+                    stats.push(StatFilter {
+                        id,
+                        label: m.raw.clone(),
+                        min,
+                        max,
+                    });
+                }
+                None => tracing::debug!(item_mod = %m.raw, "no trade2 stat match; skipping filter"),
+            }
         }
     }
 
@@ -150,6 +180,7 @@ mod tests {
     use super::*;
     use crate::itemtext::{ItemStat, ParsedItem, Rarity};
     use crate::trade::pseudo::PseudoMap;
+    use crate::trade::stats::StatCatalog;
 
     fn ring() -> ParsedItem {
         ParsedItem {
@@ -207,7 +238,12 @@ mod tests {
                 },
             ],
         };
-        let q = build_baseline(&item, &PseudoMap::load(), "Standard");
+        let q = build_baseline(
+            &item,
+            &PseudoMap::load(),
+            &StatCatalog::default(),
+            "Standard",
+        );
         let res_filters: Vec<_> = q
             .stats
             .iter()
@@ -230,7 +266,12 @@ mod tests {
 
     #[test]
     fn baseline_prefers_pseudo_resistance_over_individual_lines() {
-        let q = build_baseline(&ring(), &PseudoMap::load(), "Standard");
+        let q = build_baseline(
+            &ring(),
+            &PseudoMap::load(),
+            &StatCatalog::default(),
+            "Standard",
+        );
         assert_eq!(q.league, "Standard");
         assert_eq!(q.type_line.as_deref(), Some("Sapphire Ring"));
         let ele = q
@@ -250,10 +291,40 @@ mod tests {
 
     #[test]
     fn payload_has_status_type_and_sort() {
-        let q = build_baseline(&ring(), &PseudoMap::load(), "Standard");
+        let q = build_baseline(
+            &ring(),
+            &PseudoMap::load(),
+            &StatCatalog::default(),
+            "Standard",
+        );
         let payload = to_payload(&q);
         assert_eq!(payload["query"]["status"]["option"], "online");
         assert_eq!(payload["query"]["type"], "Sapphire Ring");
         assert_eq!(payload["sort"]["price"], "asc");
+    }
+
+    #[test]
+    fn baseline_emits_individual_filter_for_matched_nonpseudo_mod() {
+        let catalog = StatCatalog::from_json(include_str!("fixtures/stats_sample.json")).unwrap();
+        let mut item = ring(); // life + fire res + lightning res
+        item.explicits.push(ItemStat {
+            raw: "80% increased Spell Damage".into(),
+            value: Some(80.0),
+        });
+        let q = build_baseline(&item, &PseudoMap::load(), &catalog, "Standard");
+        // spell damage is non-pseudo → individual banded filter (round(0.9*80)=72, round(1.4*80)=112)
+        let sd = q
+            .stats
+            .iter()
+            .find(|s| s.id == "explicit.stat_spell_dmg")
+            .unwrap();
+        assert_eq!(sd.min, Some(72.0));
+        assert_eq!(sd.max, Some(112.0));
+        // resists stay collapsed into the pseudo, NOT individual filters
+        assert!(q
+            .stats
+            .iter()
+            .any(|s| s.id == "pseudo.pseudo_total_elemental_resistance"));
+        assert!(!q.stats.iter().any(|s| s.id == "explicit.stat_3372524247"));
     }
 }

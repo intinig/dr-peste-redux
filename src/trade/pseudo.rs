@@ -58,6 +58,15 @@ impl PseudoMap {
             })
             .collect()
     }
+
+    /// True if any pseudo rule's patterns match this stat line — i.e. the line
+    /// is already represented by a pseudo aggregate and should not be added as
+    /// an individual filter.
+    pub fn covers(&self, raw: &str) -> bool {
+        self.rules
+            .iter()
+            .any(|r| r.patterns.iter().any(|p| raw.contains(p.as_str())))
+    }
 }
 
 #[cfg(test)]

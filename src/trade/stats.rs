@@ -103,8 +103,6 @@ impl StatCatalog {
     }
 
     /// Looks up the stat id for a clipboard mod line within a group.
-    // wired in T1.5-4/T1.5-6
-    #[allow(dead_code)]
     pub fn match_stat(&self, raw_line: &str, group: StatGroup) -> Option<String> {
         self.groups.get(&group)?.get(&normalize(raw_line)).cloned()
     }

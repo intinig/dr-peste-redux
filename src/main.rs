@@ -19,6 +19,7 @@ use pricelog::ProbeLog;
 use store::{PriceStore, Snapshot};
 use trade::client::TradeClient;
 use trade::pseudo::PseudoMap;
+use trade::stats::StatCatalog;
 use trade::TradePricer;
 
 async fn refresh_once(
@@ -74,6 +75,7 @@ async fn main() -> Result<()> {
     let pricer = Arc::new(TradePricer::new(
         trade_client,
         PseudoMap::load(),
+        StatCatalog::default(),
         ProbeLog::new("probes.jsonl"),
     ));
 
