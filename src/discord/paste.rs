@@ -50,7 +50,7 @@ pub async fn paste(app_ctx: AppContext<'_>) -> Result<(), Error> {
             ))
             .await?;
         }
-        MatchOutcome::NotTracked => {
+        MatchOutcome::Rare => {
             ctx.say("That looks like rare/magic gear, which poe.ninja doesn't price. Try a unique or currency item.")
                 .await?;
         }
