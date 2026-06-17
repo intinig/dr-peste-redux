@@ -131,6 +131,22 @@ mod tests {
         }
     }
 
+    fn parsed(rarity: Rarity, name: &str, base: Option<&str>) -> ParsedItem {
+        ParsedItem {
+            rarity,
+            name: name.into(),
+            base_type: base.map(Into::into),
+            item_class: None,
+            item_level: None,
+            quality: None,
+            corrupted: false,
+            implicits: vec![],
+            enchants: vec![],
+            runes: vec![],
+            explicits: vec![],
+        }
+    }
+
     fn sample() -> Vec<PricedItem> {
         vec![
             item("Divine Orb", "currency", 11.0, 74.0, 1000.0),
@@ -179,33 +195,21 @@ mod tests {
     #[test]
     fn route_rejects_rare_gear() {
         let items = sample();
-        let parsed = ParsedItem {
-            rarity: Rarity::Rare,
-            name: "Corpse Bramble".into(),
-            base_type: Some("Vaal Regalia".into()),
-        };
+        let parsed = parsed(Rarity::Rare, "Corpse Bramble", Some("Vaal Regalia"));
         assert!(matches!(route(&items, &parsed), MatchOutcome::NotTracked));
     }
 
     #[test]
     fn route_finds_unique_by_name() {
         let items = sample();
-        let parsed = ParsedItem {
-            rarity: Rarity::Unique,
-            name: "The Dancing Dervish".into(),
-            base_type: Some("Scimitar".into()),
-        };
+        let parsed = parsed(Rarity::Unique, "The Dancing Dervish", Some("Scimitar"));
         assert!(matches!(route(&items, &parsed), MatchOutcome::Found(_)));
     }
 
     #[test]
     fn route_suggests_when_no_exact_match() {
         let items = sample();
-        let parsed = ParsedItem {
-            rarity: Rarity::Currency,
-            name: "Divine".into(),
-            base_type: None,
-        };
+        let parsed = parsed(Rarity::Currency, "Divine", None);
         assert!(matches!(
             route(&items, &parsed),
             MatchOutcome::Suggestions(_)
