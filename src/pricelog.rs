@@ -53,6 +53,7 @@ mod tests {
             },
             listing_count: 7,
             typical_divine: typical,
+            timestamp_unix: 0,
         }
     }
 

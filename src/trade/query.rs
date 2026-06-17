@@ -19,12 +19,48 @@ pub fn build_baseline(item: &ParsedItem, pseudo: &PseudoMap, league: &str) -> Tr
 
     let mut stats: Vec<StatFilter> = Vec::new();
 
+    // v1 note: only pseudo-mapped stats are emitted as filters here.
+    // Non-pseudo explicit mods (e.g. flat "increased Spell Damage") are not yet
+    // constrained — mapping explicit mod ids to trade2 stat ids is a documented
+    // follow-up.
+
     // Pseudo aggregates with a positive total become min-bounded filters.
-    for ps in pseudo.resolve(&all_stats) {
+    let resolved: Vec<_> = pseudo.resolve(&all_stats);
+
+    // When both pseudo_total_elemental_resistance and pseudo_total_resistance
+    // resolve to positive totals they describe overlapping lines — emitting both
+    // makes each single-drop delta ≈ 0 and breaks the ablation breakdown.
+    // Keep only one: prefer pseudo_total_resistance when its total is strictly
+    // greater (i.e. chaos resistance contributes), otherwise keep
+    // pseudo_total_elemental_resistance and drop the total-resistance one.
+    let ele_total = resolved
+        .iter()
+        .find(|ps| ps.id == "pseudo.pseudo_total_elemental_resistance")
+        .map(|ps| ps.total);
+    let all_total = resolved
+        .iter()
+        .find(|ps| ps.id == "pseudo.pseudo_total_resistance")
+        .map(|ps| ps.total);
+    let drop_total_resistance = match (ele_total, all_total) {
+        (Some(ele), Some(all)) => all <= ele, // no chaos contribution → keep elemental
+        _ => false,
+    };
+
+    for ps in &resolved {
         if ps.total > 0.0 {
+            if ps.id == "pseudo.pseudo_total_resistance" && drop_total_resistance {
+                continue;
+            }
+            if ps.id == "pseudo.pseudo_total_elemental_resistance"
+                && !drop_total_resistance
+                && ele_total.is_some()
+                && all_total.is_some()
+            {
+                continue;
+            }
             stats.push(StatFilter {
-                id: ps.id,
-                label: ps.label,
+                id: ps.id.clone(),
+                label: ps.label.clone(),
                 min: Some(ps.total),
                 max: None,
             });
@@ -128,6 +164,54 @@ mod tests {
                 },
             ],
         }
+    }
+
+    #[test]
+    fn fire_and_lightning_only_emits_elemental_not_total_resistance() {
+        // A ring with only fire + lightning resistance (no chaos) should produce
+        // exactly ONE resistance stat filter — the elemental one — not both
+        // pseudo_total_elemental_resistance AND pseudo_total_resistance.
+        let item = ParsedItem {
+            rarity: Rarity::Rare,
+            name: "Woe Coil".into(),
+            base_type: Some("Sapphire Ring".into()),
+            item_class: Some("Rings".into()),
+            item_level: Some(80),
+            quality: None,
+            corrupted: false,
+            implicits: vec![],
+            enchants: vec![],
+            runes: vec![],
+            explicits: vec![
+                ItemStat {
+                    raw: "+32% to Fire Resistance".into(),
+                    value: Some(32.0),
+                },
+                ItemStat {
+                    raw: "+18% to Lightning Resistance".into(),
+                    value: Some(18.0),
+                },
+            ],
+        };
+        let q = build_baseline(&item, &PseudoMap::load(), "Standard");
+        let res_filters: Vec<_> = q
+            .stats
+            .iter()
+            .filter(|s| {
+                s.id == "pseudo.pseudo_total_elemental_resistance"
+                    || s.id == "pseudo.pseudo_total_resistance"
+            })
+            .collect();
+        assert_eq!(
+            res_filters.len(),
+            1,
+            "expected exactly one resistance filter, got: {:?}",
+            res_filters.iter().map(|s| &s.id).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            res_filters[0].id, "pseudo.pseudo_total_elemental_resistance",
+            "no chaos → should keep elemental filter"
+        );
     }
 
     #[test]

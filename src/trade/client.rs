@@ -99,6 +99,13 @@ pub trait TradeApi {
 pub struct TradeClient {
     http: Client,
     rates: CurrencyRates,
+    /// Short-lived cache keyed by `"<limit>|<query_json>"`.
+    /// Entries expire after 60 seconds so repeated calls (e.g. the baseline
+    /// probe shared between `price` and `breakdown`) hit trade2 only once,
+    /// keeping traffic polite without stale data across normal poll cycles.
+    cache: std::sync::Mutex<
+        std::collections::HashMap<String, (std::time::Instant, Vec<crate::trade::model::Listing>)>,
+    >,
 }
 
 impl TradeClient {
@@ -115,6 +122,7 @@ impl TradeClient {
         Ok(Self {
             http: builder.build()?,
             rates: CurrencyRates::default(),
+            cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         })
     }
 
@@ -217,12 +225,50 @@ impl TradeApi for TradeClient {
 
 #[async_trait]
 impl crate::trade::ablation::Comparables for TradeClient {
+    /// Fetches comparable listings, with a 60-second in-memory TTL cache.
+    ///
+    /// The cache deduplicates repeated calls for the same query (e.g. the
+    /// baseline probe issued by both `price` and `breakdown`), keeping trade2
+    /// traffic polite.  We never hold the mutex across an `.await`; the pattern
+    /// is: lock → check/copy → unlock → await → lock → insert → unlock.
     async fn comparables(
         &self,
         query: &crate::trade::model::TradeQuery,
         limit: usize,
     ) -> anyhow::Result<Vec<crate::trade::model::Listing>> {
-        crate::trade::ablation::gather_comparables(self, query, limit, 3).await
+        use std::time::{Duration, Instant};
+
+        let key = format!(
+            "{}|{}",
+            limit,
+            serde_json::to_string(query).unwrap_or_default()
+        );
+
+        // --- lock, check, unlock ---
+        let cached = {
+            let guard = self.cache.lock().unwrap();
+            guard.get(&key).and_then(|(ts, listings)| {
+                if ts.elapsed() < Duration::from_secs(60) {
+                    Some(listings.clone())
+                } else {
+                    None
+                }
+            })
+        };
+        if let Some(listings) = cached {
+            return Ok(listings);
+        }
+
+        // --- await (no mutex held) ---
+        let result = crate::trade::ablation::gather_comparables(self, query, limit, 3).await?;
+
+        // --- lock, insert, unlock ---
+        {
+            let mut guard = self.cache.lock().unwrap();
+            guard.insert(key, (Instant::now(), result.clone()));
+        }
+
+        Ok(result)
     }
 }
 

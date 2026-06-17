@@ -87,6 +87,7 @@ async fn price_rare(
         .style(serenity::ButtonStyle::Secondary);
     let row = serenity::CreateActionRow::Buttons(vec![button]);
 
+    let author = ctx.author().id;
     let reply = ctx
         .send(
             poise::CreateReply::default()
@@ -100,6 +101,7 @@ async fn price_rare(
         serenity::ComponentInteractionCollector::new(ctx.serenity_context().shard.clone())
             .message_id(msg.id)
             .custom_ids(vec!["drp_breakdown".to_string()])
+            .filter(move |mci| mci.user.id == author)
             .timeout(Duration::from_secs(120))
             .await;
 

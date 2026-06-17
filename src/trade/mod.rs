@@ -52,10 +52,15 @@ impl<C: Comparables> TradePricer<C> {
     }
 
     fn record(&self, query: &crate::trade::model::TradeQuery, est: &PriceEstimate) {
+        let timestamp_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
         let probe = Probe {
             query: query.clone(),
             listing_count: est.listing_count,
             typical_divine: est.typical,
+            timestamp_unix,
         };
         if let Err(e) = self.log.append(&probe) {
             tracing::warn!(error = %e, "failed to append probe to price log");

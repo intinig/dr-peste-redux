@@ -80,6 +80,10 @@ fn estimate_from(listings: &[Listing]) -> PriceEstimate {
 
 /// Ablate the top-`k` stat filters (single-drop), ranked by delta, plus one
 /// pairwise probe on the top two to flag synergy.
+///
+/// Query budget per call: 1 baseline + min(k, stats.len()) single-drops + 1 pairwise.
+/// v1 stat selection: iterate `query.stats` in order and take the first `k`
+/// (a smarter clipboard heuristic is a documented follow-up).
 pub async fn breakdown<C: Comparables + ?Sized>(
     c: &C,
     query: &TradeQuery,
@@ -88,8 +92,12 @@ pub async fn breakdown<C: Comparables + ?Sized>(
 ) -> Result<Breakdown> {
     let baseline = estimate(c, query, limit).await?;
 
+    // Select at most k stats to probe (v1: take first k in order).
+    let probe_count = k.max(1).min(query.stats.len());
+
     let mut ranked: Vec<Contribution> = Vec::new();
-    for (i, sf) in query.stats.iter().enumerate() {
+    for i in 0..probe_count {
+        let sf = &query.stats[i];
         let mut q = query.clone();
         q.stats.remove(i);
         let without = estimate(c, &q, limit).await?;
@@ -104,6 +112,7 @@ pub async fn breakdown<C: Comparables + ?Sized>(
             .partial_cmp(&a.delta_divine)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
+    // Defensive truncate — ranked already has at most k entries, but keep for clarity.
     ranked.truncate(k.max(1));
 
     // Pairwise synergy on the top two (by name → find their indices in query).
@@ -285,6 +294,39 @@ mod tests {
         assert_eq!(est.confidence, Confidence::High);
         // both stats present → 5+10+2+6 = 23
         assert_eq!(est.typical, 23.0);
+    }
+
+    /// Counting fake: increments an atomic counter on every `comparables` call,
+    /// and always returns a fixed set of listings so estimates are well-defined.
+    struct CountingComparables {
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Comparables for CountingComparables {
+        async fn comparables(
+            &self,
+            _q: &TradeQuery,
+            _limit: usize,
+        ) -> anyhow::Result<Vec<Listing>> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            // Return 12 listings at a fixed price so estimates always succeed.
+            Ok(vec![listing(10.0); 12])
+        }
+    }
+
+    #[tokio::test]
+    async fn breakdown_query_budget_is_bounded_by_k() {
+        // Build a query with 6 stat filters.
+        let q = q_with(6);
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let fake = CountingComparables {
+            calls: calls.clone(),
+        };
+        // k=4 → budget ≤ 1 baseline + 4 single-drops + 1 pairwise = 6
+        breakdown(&fake, &q, 10, 4).await.unwrap();
+        let n = calls.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(n <= 6, "expected ≤ 6 comparables calls (1+4+1), got {n}");
     }
 
     #[tokio::test]

@@ -88,6 +88,9 @@ pub struct PriceEstimate {
     pub confidence: Confidence,
 }
 
+/// Describes how a stat filter was ablated in a breakdown probe.
+/// v1 supports only `Drop` (remove the filter entirely); relaxing a bound
+/// (e.g. lowering the min) is a documented future variant.
 #[derive(Clone, Debug, PartialEq)]
 pub enum AblationKind {
     Drop,
@@ -97,7 +100,7 @@ pub enum AblationKind {
 pub struct Contribution {
     pub characteristic: String,
     pub kind: AblationKind,
-    /// How many divine the price drops when this characteristic is removed/relaxed.
+    /// How many divine the price drops when this characteristic is removed.
     pub delta_divine: f64,
 }
 
@@ -122,6 +125,7 @@ pub struct Probe {
     pub query: TradeQuery,
     pub listing_count: usize,
     pub typical_divine: f64,
+    pub timestamp_unix: u64,
 }
 
 #[cfg(test)]

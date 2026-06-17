@@ -18,3 +18,7 @@ Cargo.lock.orig
 .playwright-mcp/
 .remember/
 .serena/
+
+# Runtime data — never commit
+probes.jsonl
+/probes.jsonl
