@@ -6,8 +6,8 @@ use async_trait::async_trait;
 
 use crate::trade::client::TradeApi;
 use crate::trade::model::{
-    AblationKind, Breakdown, Confidence, Contribution, Listing, PriceEstimate, SynergyNote,
-    TradeQuery,
+    AblationKind, Breakdown, Confidence, Contribution, Currency, Listing, PriceEstimate,
+    SynergyNote, TradeQuery,
 };
 
 /// High-level seam the pricer depends on. `TradeClient` implements it via
@@ -75,6 +75,23 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
     sorted[lo] + (sorted[hi] - sorted[lo]) * (rank - lo as f64)
 }
 
+/// The currency most listings are priced in (the market's preferred unit for
+/// this item). Defaults to Divine when there are no listings.
+fn modal_currency(listings: &[Listing]) -> Currency {
+    use std::collections::HashMap;
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for l in listings {
+        *counts.entry(l.price.currency.code()).or_insert(0) += 1;
+    }
+    match counts.into_iter().max_by_key(|(_, n)| *n).map(|(c, _)| c) {
+        Some("exalted") => Currency::Exalted,
+        Some("chaos") => Currency::Chaos,
+        Some("divine") => Currency::Divine,
+        Some(other) => Currency::Other(other.to_string()),
+        None => Currency::Divine,
+    }
+}
+
 fn estimate_from(listings: &[Listing]) -> PriceEstimate {
     let mut prices: Vec<f64> = listings.iter().map(|l| l.price_divine).collect();
     prices.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
@@ -93,6 +110,7 @@ fn estimate_from(listings: &[Listing]) -> PriceEstimate {
         high,
         listing_count: n,
         confidence: Confidence::from_count(n),
+        modal_currency: modal_currency(listings),
     }
 }
 
@@ -177,10 +195,30 @@ pub async fn breakdown<C: Comparables + ?Sized>(
     })
 }
 
+/// Percent-encodes a string as a URL path segment: RFC 3986 unreserved chars
+/// are kept, everything else (spaces, reserved chars, non-ASCII) is encoded, so
+/// arbitrary league names produce a well-formed URL.
+fn encode_segment(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
 /// Human-clickable trade2 search URL for the item's league (a fresh search; the
-/// API search id is ephemeral, so we link to the site search page instead).
+/// API search id is ephemeral, so we link to the site search page). The PoE2
+/// trade site route is realm-namespaced (`/trade2/search/poe2/<league>`), and
+/// the league is percent-encoded so the embed `url` is always well-formed.
 pub fn trade_url(query: &TradeQuery) -> String {
-    format!("https://www.pathofexile.com/trade2/search/{}", query.league)
+    format!(
+        "https://www.pathofexile.com/trade2/search/poe2/{}",
+        encode_segment(&query.league)
+    )
 }
 
 #[cfg(test)]
@@ -369,5 +407,32 @@ mod tests {
         assert_eq!(super::percentile(&[10.0, 20.0, 30.0, 40.0], 0.25), 17.5);
         assert_eq!(super::percentile(&[10.0], 0.5), 10.0);
         assert_eq!(super::percentile(&[], 0.5), 0.0);
+    }
+
+    #[test]
+    fn trade_url_has_poe2_realm_and_encodes_league() {
+        let q = TradeQuery {
+            league: "Runes of Aldur".into(),
+            category: None,
+            type_line: None,
+            stats: vec![],
+            misc: MiscFilters::default(),
+        };
+        let url = trade_url(&q);
+        assert!(
+            !url.contains(' '),
+            "url must not contain a raw space: {url}"
+        );
+        assert!(
+            url.ends_with("/trade2/search/poe2/Runes%20of%20Aldur"),
+            "{url}"
+        );
+        // reserved characters in a league name are percent-encoded
+        let q2 = TradeQuery {
+            league: "A/B".into(),
+            ..q
+        };
+        let url2 = trade_url(&q2);
+        assert!(url2.ends_with("/poe2/A%2FB"), "{url2}");
     }
 }

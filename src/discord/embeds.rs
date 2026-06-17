@@ -3,7 +3,7 @@ use poise::serenity_prelude as serenity;
 use crate::itemtext::ParsedItem;
 use crate::poeninja::model::PricedItem;
 use crate::poeninja::League;
-use crate::trade::model::{Breakdown, Confidence, Contribution, PriceEstimate};
+use crate::trade::model::{Breakdown, Confidence, Contribution, Currency, PriceEstimate};
 
 /// Picks a human-friendly value string: divine if ≥1 divine, else exalted if
 /// ≥1 exalted, else chaos.
@@ -85,7 +85,26 @@ pub fn farm_embed(title: &str, items: &[&PricedItem], league: &League) -> sereni
 }
 
 pub fn div_str(v: f64) -> String {
-    format!("{v:.1} div")
+    // Finer precision below 1 div so cheap items don't render as "0.0 div".
+    if v >= 1.0 {
+        format!("{v:.1} div")
+    } else {
+        format!("{v:.2} div")
+    }
+}
+
+/// Formats a divine value, and when the market prices this item in a non-divine
+/// currency, appends the equivalent on a second line (e.g. "0.10 div\n≈ 20 ex").
+/// `div_per_unit` is the divine value of one unit of `modal` (from the live rate
+/// table); a missing/non-positive rate or a Divine modal omits the second line.
+pub fn value_lines(div: f64, modal: &Currency, div_per_unit: Option<f64>) -> String {
+    let main = div_str(div);
+    match div_per_unit {
+        Some(rate) if rate > 0.0 && div > 0.0 && !matches!(modal, Currency::Divine) => {
+            format!("{main}\n≈ {:.0} {}", div / rate, modal.short())
+        }
+        _ => main,
+    }
 }
 
 pub fn confidence_string(c: &Confidence) -> String {
@@ -105,6 +124,7 @@ pub fn estimate_embed(
     parsed: &ParsedItem,
     est: &PriceEstimate,
     league: &League,
+    secondary_rate: Option<f64>,
 ) -> serenity::CreateEmbed {
     let title = parsed
         .base_type
@@ -118,9 +138,21 @@ pub fn estimate_embed(
         embed = embed.field("Estimated value", "No comparable listings found", false);
     } else {
         embed = embed
-            .field("Quick sale", div_str(est.low), true)
-            .field("Fair", div_str(est.typical), true)
-            .field("Patient", div_str(est.high), true)
+            .field(
+                "Quick sale",
+                value_lines(est.low, &est.modal_currency, secondary_rate),
+                true,
+            )
+            .field(
+                "Fair",
+                value_lines(est.typical, &est.modal_currency, secondary_rate),
+                true,
+            )
+            .field(
+                "Patient",
+                value_lines(est.high, &est.modal_currency, secondary_rate),
+                true,
+            )
             .field(
                 "Confidence",
                 format!(
@@ -216,8 +248,24 @@ mod tests {
     use crate::trade::model::{AblationKind, Confidence, Contribution};
 
     #[test]
-    fn div_str_formats_one_decimal() {
+    fn div_str_formats_by_magnitude() {
         assert_eq!(div_str(8.0), "8.0 div");
+        assert_eq!(div_str(1.0), "1.0 div");
+        // sub-1-div values get finer precision so cheap items aren't "0.0 div"
+        assert_eq!(div_str(0.04), "0.04 div");
+    }
+
+    #[test]
+    fn value_lines_appends_modal_currency_when_not_divine() {
+        use crate::trade::model::Currency;
+        // 1 ex = 0.005 div → 0.1 div = 20 ex
+        let s = value_lines(0.1, &Currency::Exalted, Some(0.005));
+        assert!(s.contains("0.10 div"));
+        assert!(s.contains("≈ 20 ex"));
+        // divine modal → no second line
+        assert_eq!(value_lines(0.1, &Currency::Divine, Some(0.005)), "0.10 div");
+        // no rate → just divine
+        assert_eq!(value_lines(0.1, &Currency::Exalted, None), "0.10 div");
     }
 
     #[test]

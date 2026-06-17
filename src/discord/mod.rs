@@ -4,7 +4,7 @@ pub mod help;
 pub mod paste;
 pub mod price;
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use futures::Stream;
 
@@ -17,6 +17,7 @@ pub struct Data {
     pub store: PriceStore,
     pub config: Config,
     pub pricer: Arc<TradePricer<TradeClient>>,
+    pub rates: Arc<RwLock<crate::trade::rates::RateTable>>,
 }
 
 pub type Error = anyhow::Error;
