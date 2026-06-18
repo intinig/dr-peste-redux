@@ -96,6 +96,7 @@ mod tests {
         ItemStat {
             raw: raw.to_string(),
             value: Some(v),
+            affix: None,
         }
     }
 

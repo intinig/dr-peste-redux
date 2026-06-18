@@ -229,14 +229,17 @@ mod tests {
                 ItemStat {
                     raw: "+40 to maximum Life".into(),
                     value: Some(40.0),
+                    affix: None,
                 },
                 ItemStat {
                     raw: "+32% to Fire Resistance".into(),
                     value: Some(32.0),
+                    affix: None,
                 },
                 ItemStat {
                     raw: "+18% to Lightning Resistance".into(),
                     value: Some(18.0),
+                    affix: None,
                 },
             ],
         }
@@ -265,10 +268,12 @@ mod tests {
                 ItemStat {
                     raw: "+32% to Fire Resistance".into(),
                     value: Some(32.0),
+                    affix: None,
                 },
                 ItemStat {
                     raw: "+18% to Lightning Resistance".into(),
                     value: Some(18.0),
+                    affix: None,
                 },
             ],
         };
@@ -344,6 +349,7 @@ mod tests {
         item.explicits.push(ItemStat {
             raw: "80% increased Spell Damage".into(),
             value: Some(80.0),
+            affix: None,
         });
         let q = build_baseline(&item, &PseudoMap::load(), &catalog, "Standard");
         // spell damage is non-pseudo → individual banded filter (round(0.9*80)=72, round(1.4*80)=112)
@@ -444,15 +450,18 @@ mod tests {
             runes: vec![ItemStat {
                 raw: "+18% to Cold Resistance".into(),
                 value: Some(18.0),
+                affix: None,
             }],
             explicits: vec![
                 ItemStat {
                     raw: "+34% to Lightning Resistance".into(),
                     value: Some(34.0),
+                    affix: None,
                 },
                 ItemStat {
                     raw: "+39% to Fire Resistance".into(),
                     value: Some(39.0),
+                    affix: None,
                 },
             ],
         };

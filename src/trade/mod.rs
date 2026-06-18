@@ -140,6 +140,7 @@ mod tests {
             explicits: vec![ItemStat {
                 raw: "+40 to maximum Life".into(),
                 value: Some(40.0),
+                affix: None,
             }],
         }
     }
