@@ -22,10 +22,12 @@ use crate::trade::session::TradeSession;
 use crate::trade::stats::StatCatalog;
 
 /// Number of cheapest listings to fetch per query before craftability filtering.
-/// Widened so craft-tier comparables aren't crowded out by a deep junk floor before
-/// the filter runs. (A fuller fix — paginating further when no craft-tier survivors
-/// are found — is tracked as a follow-up.)
-const COMPARABLE_SAMPLE: usize = 50;
+/// Set to the practical search-result cap so the whole constrained result is
+/// considered and craft-tier comparables in the tail aren't crowded out by the
+/// junk floor. `gather_comparables` fetches `min(result, limit)`, so smaller
+/// result sets cost no more; only the BroadMarket fallback (no craft-tier base in
+/// the whole result) prices broadly, and that path is already low-confidence + labelled.
+const COMPARABLE_SAMPLE: usize = 100;
 /// Number of characteristics to ablate in a breakdown.
 const TOP_K: usize = 4;
 
