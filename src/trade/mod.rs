@@ -50,7 +50,15 @@ impl<C: Comparables> TradePricer<C> {
         session: &TradeSession,
     ) -> Result<PriceEstimate> {
         let query = build_baseline(item, &self.pseudo, &self.catalog, league);
-        let est = estimate(&self.comparables, &query, COMPARABLE_SAMPLE, session).await?;
+        let max_explicit = item.craftability().map(|c| c.explicit_count as usize);
+        let est = estimate(
+            &self.comparables,
+            &query,
+            COMPARABLE_SAMPLE,
+            session,
+            max_explicit,
+        )
+        .await?;
         self.record(&query, &est);
         Ok(est)
     }
@@ -62,12 +70,14 @@ impl<C: Comparables> TradePricer<C> {
         session: &TradeSession,
     ) -> Result<Breakdown> {
         let query = build_baseline(item, &self.pseudo, &self.catalog, league);
+        let max_explicit = item.craftability().map(|c| c.explicit_count as usize);
         let bd = crate::trade::ablation::breakdown(
             &self.comparables,
             &query,
             COMPARABLE_SAMPLE,
             TOP_K,
             session,
+            max_explicit,
         )
         .await?;
         self.record(&query, &bd.baseline);
