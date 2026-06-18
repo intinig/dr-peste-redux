@@ -115,7 +115,8 @@ mod tests {
                         amount: self.0,
                         currency: Currency::Divine
                     },
-                    price_divine: self.0
+                    price_divine: self.0,
+                    explicit_count: 0,
                 };
                 8
             ])

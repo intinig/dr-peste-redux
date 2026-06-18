@@ -146,6 +146,12 @@ impl TradeClient {
                         if price_divine <= 0.0 {
                             return None;
                         }
+                        let explicit_count = entry
+                            .get("item")
+                            .and_then(|it| it.get("explicitMods"))
+                            .and_then(|m| m.as_array())
+                            .map(|a| a.len())
+                            .unwrap_or(0);
                         let money = Money {
                             amount,
                             currency: Self::parse_currency(code),
@@ -153,6 +159,7 @@ impl TradeClient {
                         Some(Listing {
                             price: money,
                             price_divine,
+                            explicit_count,
                         })
                     })
                     .collect()
@@ -351,15 +358,23 @@ mod tests {
         let client = test_client();
         let v = serde_json::json!({
             "result": [
-                { "listing": { "price": { "amount": 2.0, "currency": "divine" } } },
-                { "listing": { "price": { "amount": 1.0, "currency": "aug" } } },
-                { "listing": { "price": { "amount": 50.0, "currency": "chaos" } } }
+                { "listing": { "price": { "amount": 2.0, "currency": "divine" } },
+                  "item": { "explicitMods": ["a", "b", "c"] } },
+                { "listing": { "price": { "amount": 1.0, "currency": "aug" } },
+                  "item": { "explicitMods": ["x"] } },
+                { "listing": { "price": { "amount": 50.0, "currency": "chaos" } },
+                  "item": { "explicitMods": ["p", "q", "r", "s"] } }
             ]
         });
         let listings = client.parse_fetch(&v);
         // "aug" is unconvertible → dropped; divine + chaos kept, both positive.
         assert_eq!(listings.len(), 2);
         assert!(listings.iter().all(|l| l.price_divine > 0.0));
+        // explicit_count comes from item.explicitMods length
+        let divine = listings.iter().find(|l| l.price.amount == 2.0).unwrap();
+        assert_eq!(divine.explicit_count, 3);
+        let chaos = listings.iter().find(|l| l.price.amount == 50.0).unwrap();
+        assert_eq!(chaos.explicit_count, 4);
     }
 
     #[tokio::test]

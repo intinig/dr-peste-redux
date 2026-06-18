@@ -43,6 +43,9 @@ pub struct Listing {
     pub price: Money,
     /// Price normalized to Divine Orbs for comparison/ranking.
     pub price_divine: f64,
+    /// Count of explicit (prefix/suffix) mods on the listed item; the
+    /// craftability-tier key. `0` when the fetch response omits mods.
+    pub explicit_count: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Default, Serialize)]
@@ -170,6 +173,7 @@ mod tests {
                 currency: Currency::Exalted,
             },
             price_divine: 0.5,
+            explicit_count: 0,
         };
         assert_eq!(l.price_divine, 0.5);
         assert!(matches!(l.price.currency, Currency::Exalted));

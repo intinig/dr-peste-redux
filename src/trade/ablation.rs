@@ -256,6 +256,7 @@ mod tests {
                 currency: Currency::Divine,
             },
             price_divine: divine,
+            explicit_count: 0,
         }
     }
 
