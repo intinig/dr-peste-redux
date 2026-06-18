@@ -31,8 +31,12 @@ const PROBE_CEILING: usize = 16;
 const TRIM_BOTTOM_FRAC: f64 = 0.10;
 /// Only trim when at least this many comparables survive the craftability filter.
 const TRIM_MIN_N: usize = 8;
+/// Relax the query (drop a filter) only while the constrained search yields fewer
+/// comparables than this. Decoupled from the fetch cap (COMPARABLE_SAMPLE): a query
+/// returning, say, 60 exact matches must NOT be relaxed just because it's < the cap.
+const MIN_COMPARABLES: usize = 10;
 
-/// Searches + fetches up to `limit` cheapest listings. If fewer than `limit`
+/// Searches + fetches up to `limit` cheapest listings. If fewer than `MIN_COMPARABLES`
 /// are found, relaxes the query (drops the last stat filter, then the last
 /// equipment band) and retries, up to `max_relax` times. Returns whatever it
 /// has (possibly empty).
@@ -55,7 +59,7 @@ pub async fn gather_comparables<A: TradeApi + ?Sized>(
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         let exhausted = q.stats.is_empty() && q.equipment.is_empty();
-        if listings.len() >= limit || relaxations >= max_relax || exhausted {
+        if listings.len() >= MIN_COMPARABLES || relaxations >= max_relax || exhausted {
             return Ok(listings);
         }
         // Relax the loosest constraint: stat filters first, then equipment bands.
@@ -439,6 +443,55 @@ mod tests {
         assert!(
             got.len() >= 5,
             "should relax equipment bands to reach the limit"
+        );
+    }
+
+    #[tokio::test]
+    async fn does_not_relax_when_result_meets_minimum() {
+        // A tight 3-stat query already returning >= MIN_COMPARABLES must NOT be
+        // relaxed (relaxing would price from a broadened, non-matching market).
+        struct FatApi {
+            seen: Mutex<Vec<TradeQuery>>,
+        }
+        #[async_trait]
+        impl TradeApi for FatApi {
+            async fn search(
+                &self,
+                q: &TradeQuery,
+                _s: &TradeSession,
+            ) -> anyhow::Result<SearchResponse> {
+                self.seen.lock().unwrap().push(q.clone());
+                let hashes = (0..12).map(|i| format!("h{i}")).collect::<Vec<_>>();
+                Ok(SearchResponse {
+                    id: "qid".into(),
+                    total: 12,
+                    hashes,
+                })
+            }
+            async fn fetch(
+                &self,
+                _id: &str,
+                hashes: &[String],
+                _s: &TradeSession,
+            ) -> anyhow::Result<Vec<Listing>> {
+                Ok(hashes
+                    .iter()
+                    .enumerate()
+                    .map(|(i, _)| listing(10.0 + i as f64))
+                    .collect())
+            }
+        }
+        let api = FatApi {
+            seen: Mutex::new(vec![]),
+        };
+        let got = gather_comparables(&api, &q_with(3), 100, 3, &TradeSession::for_test())
+            .await
+            .unwrap();
+        assert_eq!(got.len(), 12);
+        assert_eq!(
+            api.seen.lock().unwrap().len(),
+            1,
+            "must not relax — one search only"
         );
     }
 
