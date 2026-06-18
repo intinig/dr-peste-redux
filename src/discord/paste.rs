@@ -71,8 +71,15 @@ async fn price_rare(
 ) -> Result<(), Error> {
     use poise::serenity_prelude as serenity;
 
+    let uid = ctx.author().id.get();
+    let Some(session) = ctx.data().sessions.session_for(uid) else {
+        ctx.say("🔑 You need to connect your PoE account first — coming in the next step.")
+            .await?;
+        return Ok(());
+    };
+
     let pricer = ctx.data().pricer.clone();
-    let est = match pricer.price(parsed, &league.name).await {
+    let est = match pricer.price(parsed, &league.name, &session).await {
         Ok(e) => e,
         Err(e) => {
             tracing::warn!(error = %e, "trade price failed");
@@ -119,7 +126,7 @@ async fn price_rare(
     match interaction {
         Some(mci) => {
             mci.defer(ctx.serenity_context()).await?;
-            match pricer.breakdown(parsed, &league.name).await {
+            match pricer.breakdown(parsed, &league.name, &session).await {
                 Ok(bd) => {
                     mci.create_followup(
                         ctx.serenity_context(),

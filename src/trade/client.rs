@@ -4,6 +4,7 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use reqwest::{header, Client};
+use secrecy::{ExposeSecret, SecretString};
 use serde_json::Value;
 
 use std::sync::{Arc, RwLock};
@@ -11,6 +12,7 @@ use std::sync::{Arc, RwLock};
 use crate::trade::model::{Currency, Listing, Money, SearchResponse, TradeQuery};
 use crate::trade::query::to_payload;
 use crate::trade::rates::RateTable;
+use crate::trade::session::TradeSession;
 
 pub(crate) const TRADE_BASE: &str = "https://www.pathofexile.com/api/trade2";
 pub(crate) const USER_AGENT: &str =
@@ -65,10 +67,26 @@ pub fn retry_after_secs(headers: &reqwest::header::HeaderMap) -> u64 {
     5
 }
 
+/// Attaches the member's POESESSID as a per-request, sensitive Cookie header.
+fn with_cookie(rb: reqwest::RequestBuilder, cookie: &SecretString) -> reqwest::RequestBuilder {
+    match header::HeaderValue::from_str(&format!("POESESSID={}", cookie.expose_secret())) {
+        Ok(mut v) => {
+            v.set_sensitive(true);
+            rb.header(header::COOKIE, v)
+        }
+        Err(_) => rb, // malformed cookie ⇒ send anonymous rather than panic
+    }
+}
+
 #[async_trait]
 pub trait TradeApi {
-    async fn search(&self, query: &TradeQuery) -> Result<SearchResponse>;
-    async fn fetch(&self, query_id: &str, hashes: &[String]) -> Result<Vec<Listing>>;
+    async fn search(&self, query: &TradeQuery, session: &TradeSession) -> Result<SearchResponse>;
+    async fn fetch(
+        &self,
+        query_id: &str,
+        hashes: &[String],
+        session: &TradeSession,
+    ) -> Result<Vec<Listing>>;
 }
 
 pub struct TradeClient {
@@ -176,11 +194,13 @@ impl TradeClient {
 
 #[async_trait]
 impl TradeApi for TradeClient {
-    async fn search(&self, query: &TradeQuery) -> Result<SearchResponse> {
+    async fn search(&self, query: &TradeQuery, session: &TradeSession) -> Result<SearchResponse> {
         let url = format!("{TRADE_BASE}/search/{}", query.league);
         let payload = to_payload(query);
         let resp = self
-            .send_with_retry(|| self.http.post(&url).json(&payload))
+            .send_with_retry(|| {
+                with_cookie(session.client.post(&url).json(&payload), &session.cookie)
+            })
             .await
             .context("trade2 search failed")?;
         let v: Value = resp.json().await?;
@@ -202,14 +222,19 @@ impl TradeApi for TradeClient {
         Ok(SearchResponse { id, total, hashes })
     }
 
-    async fn fetch(&self, query_id: &str, hashes: &[String]) -> Result<Vec<Listing>> {
+    async fn fetch(
+        &self,
+        query_id: &str,
+        hashes: &[String],
+        session: &TradeSession,
+    ) -> Result<Vec<Listing>> {
         if hashes.is_empty() {
             return Ok(Vec::new());
         }
         let csv = hashes.join(",");
         let url = format!("{TRADE_BASE}/fetch/{csv}?query={query_id}");
         let v: Value = self
-            .send_with_retry(|| self.http.get(&url))
+            .send_with_retry(|| with_cookie(session.client.get(&url), &session.cookie))
             .await
             .context("trade2 fetch failed")?
             .json()
@@ -230,6 +255,7 @@ impl crate::trade::ablation::Comparables for TradeClient {
         &self,
         query: &crate::trade::model::TradeQuery,
         limit: usize,
+        session: &TradeSession,
     ) -> anyhow::Result<Vec<crate::trade::model::Listing>> {
         use std::time::{Duration, Instant};
 
@@ -255,7 +281,8 @@ impl crate::trade::ablation::Comparables for TradeClient {
         }
 
         // --- await (no mutex held) ---
-        let result = crate::trade::ablation::gather_comparables(self, query, limit, 3).await?;
+        let result =
+            crate::trade::ablation::gather_comparables(self, query, limit, 3, session).await?;
 
         // --- lock, prune expired, insert, unlock ---
         {
@@ -353,10 +380,11 @@ mod tests {
             misc: MiscFilters::default(),
             equipment: vec![],
         };
-        let resp = client.search(&q).await.unwrap();
+        let session = crate::trade::session::TradeSession::for_test();
+        let resp = client.search(&q, &session).await.unwrap();
         assert!(resp.total > 0);
         let listings = client
-            .fetch(&resp.id, &resp.hashes[..resp.hashes.len().min(5)])
+            .fetch(&resp.id, &resp.hashes[..resp.hashes.len().min(5)], &session)
             .await
             .unwrap();
         assert!(
