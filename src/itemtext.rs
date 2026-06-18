@@ -211,7 +211,7 @@ pub fn parse(text: &str) -> Option<ParsedItem> {
             Some("rune") => runes.push(stat),
             _ => {
                 let mut s = stat;
-                s.affix = current_affix;
+                s.affix = current_affix.take(); // one slot per { … } block; hybrid continuation lines get None
                 explicits.push(s);
             }
         }
@@ -425,6 +425,34 @@ mod tests {
             .find(|s| s.raw.contains("Rarity of Items found"))
             .unwrap();
         assert_eq!(rarity.affix, Some(Affix::Suffix));
+    }
+
+    // One prefix BLOCK with two stat lines (a hybrid affix) + one suffix block.
+    const RARE_HYBRID: &str = "Item Class: Body Armours\nRarity: Rare\nHybrid Test\nVaal Regalia\n--------\nItem Level: 80\n--------\n{ Prefix Modifier \"Of the Bear\" (Tier: 1) }\n+50 to maximum Life\n+30 to maximum Mana\n{ Suffix Modifier \"of Magma\" (Tier: 2) }\n+40% to Fire Resistance\n";
+
+    #[test]
+    fn hybrid_affix_counts_as_one_block() {
+        let p = parse(RARE_HYBRID).unwrap();
+        // Both hybrid stat lines are kept as query filters...
+        assert_eq!(p.explicits.len(), 3); // life, mana, fire res
+                                          // ...but only the first carries the prefix tag (one block = one slot).
+        let life = p
+            .explicits
+            .iter()
+            .find(|s| s.raw.contains("maximum Life"))
+            .unwrap();
+        let mana = p
+            .explicits
+            .iter()
+            .find(|s| s.raw.contains("maximum Mana"))
+            .unwrap();
+        assert_eq!(life.affix, Some(Affix::Prefix));
+        assert_eq!(mana.affix, None); // continuation line of the same block
+        let c = p.craftability().expect("advanced-mode tags present");
+        assert_eq!(c.filled_prefixes, 1);
+        assert_eq!(c.open_prefixes, 2);
+        assert_eq!(c.filled_suffixes, 1);
+        assert_eq!(c.explicit_count, 2); // 1 prefix block + 1 suffix block
     }
 
     #[test]

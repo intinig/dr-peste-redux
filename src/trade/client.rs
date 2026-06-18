@@ -25,6 +25,31 @@ pub struct RateRule {
     pub restriction: u32,
 }
 
+/// Filled prefix+suffix affix count for a fetched item, hybrid-safe, from the
+/// best signal the trade2 fetch response carries:
+/// `extended.prefixes+suffixes` → `extended.mods.explicit` → `explicitMods` → 0.
+fn affix_count(item: &Value) -> usize {
+    if let Some(ext) = item.get("extended") {
+        let p = ext.get("prefixes").and_then(|v| v.as_u64());
+        let s = ext.get("suffixes").and_then(|v| v.as_u64());
+        if p.is_some() || s.is_some() {
+            return (p.unwrap_or(0) + s.unwrap_or(0)) as usize;
+        }
+        if let Some(n) = ext
+            .get("mods")
+            .and_then(|m| m.get("explicit"))
+            .and_then(|e| e.as_array())
+            .map(|a| a.len())
+        {
+            return n;
+        }
+    }
+    item.get("explicitMods")
+        .and_then(|m| m.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0)
+}
+
 /// Parses an `X-Rate-Limit-*` value: comma-separated `max:period:restriction`.
 pub fn parse_rate_rules(header_value: &str) -> Vec<RateRule> {
     header_value
@@ -146,12 +171,7 @@ impl TradeClient {
                         if price_divine <= 0.0 {
                             return None;
                         }
-                        let explicit_count = entry
-                            .get("item")
-                            .and_then(|it| it.get("explicitMods"))
-                            .and_then(|m| m.as_array())
-                            .map(|a| a.len())
-                            .unwrap_or(0);
+                        let explicit_count = entry.get("item").map(affix_count).unwrap_or(0);
                         let money = Money {
                             amount,
                             currency: Self::parse_currency(code),
@@ -375,6 +395,41 @@ mod tests {
         assert_eq!(divine.explicit_count, 3);
         let chaos = listings.iter().find(|l| l.price.amount == 50.0).unwrap();
         assert_eq!(chaos.explicit_count, 4);
+    }
+
+    #[test]
+    fn parse_fetch_affix_count_layers() {
+        let client = test_client();
+        let v = serde_json::json!({
+            "result": [
+                // Layer 1: extended.prefixes + suffixes (exact, hybrid-safe)
+                { "listing": { "price": { "amount": 1.0, "currency": "divine" } },
+                  "item": { "extended": { "prefixes": 2, "suffixes": 3 },
+                            "explicitMods": ["a","b","c","d","e","f"] } },
+                // Layer 2: extended.mods.explicit (one entry per affix)
+                { "listing": { "price": { "amount": 2.0, "currency": "divine" } },
+                  "item": { "extended": { "mods": { "explicit": ["x","y"] } },
+                            "explicitMods": ["x1","x2","y1"] } },
+                // Layer 3: explicitMods only (display lines)
+                { "listing": { "price": { "amount": 3.0, "currency": "divine" } },
+                  "item": { "explicitMods": ["p","q","r","s"] } },
+                // Layer 4: nothing → 0 (unknown)
+                { "listing": { "price": { "amount": 4.0, "currency": "divine" } },
+                  "item": {} }
+            ]
+        });
+        let ls = client.parse_fetch(&v);
+        assert_eq!(ls.len(), 4);
+        let ec = |amt: f64| {
+            ls.iter()
+                .find(|l| l.price.amount == amt)
+                .unwrap()
+                .explicit_count
+        };
+        assert_eq!(ec(1.0), 5); // 2 + 3, NOT the 6 explicitMods lines
+        assert_eq!(ec(2.0), 2); // per-affix, NOT the 3 lines
+        assert_eq!(ec(3.0), 4); // line count
+        assert_eq!(ec(4.0), 0); // unknown
     }
 
     #[tokio::test]
