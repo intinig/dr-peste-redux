@@ -129,7 +129,6 @@ async fn main() -> Result<()> {
                     pricer,
                     rates,
                     sessions,
-                    pending: std::sync::RwLock::new(std::collections::HashMap::new()),
                 })
             })
         })

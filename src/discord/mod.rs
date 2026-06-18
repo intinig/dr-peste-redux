@@ -20,8 +20,6 @@ pub struct Data {
     pub pricer: Arc<TradePricer<TradeClient>>,
     pub rates: Arc<RwLock<crate::trade::rates::RateTable>>,
     pub sessions: Arc<crate::trade::session::MemberSessions>,
-    pub pending:
-        RwLock<std::collections::HashMap<u64, (crate::itemtext::ParsedItem, std::time::Instant)>>,
 }
 
 pub type Error = anyhow::Error;

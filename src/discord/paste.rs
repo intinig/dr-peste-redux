@@ -203,12 +203,6 @@ async fn prompt_connect(
     use poise::serenity_prelude as serenity;
 
     let uid = ctx.author().id.get();
-    // Stash the parsed item so we can price it after the member connects.
-    ctx.data()
-        .pending
-        .write()
-        .unwrap()
-        .insert(uid, (parsed.clone(), std::time::Instant::now()));
 
     let button = serenity::CreateButton::new("drp_connect")
         .label("🔑 Connect your PoE account")
@@ -219,9 +213,9 @@ async fn prompt_connect(
             poise::CreateReply::default()
                 .ephemeral(true)
                 .content(
-                    "To price rares I search the trade site as **you**. \
-                     Click below and paste your **POESESSID** (pathofexile.com cookie). \
-                     It's kept in memory only, used solely for your searches, and you can remove it any time with `/logout`. \
+                    "To price rares I search the trade site as **you**. \n\
+                     Click below and paste your **POESESSID** (pathofexile.com cookie). \n\
+                     It's kept in memory only, used solely for your searches, and you can remove it any time with `/logout`. \n\
                      Privacy: https://drp.pme.it/privacy",
                 )
                 .components(vec![row]),
@@ -271,22 +265,21 @@ async fn prompt_connect(
     let cookie = secrecy::SecretString::new(modal.poesessid.trim().to_string());
     if let Err(e) = ctx.data().sessions.store(uid, cookie).await {
         tracing::warn!(error = %e, "session store/validation failed"); // never logs the cookie
-        ctx.send(poise::CreateReply::default().ephemeral(true).content("Couldn't reach trade with that session — is your POESESSID current? Copy it again and `/paste`."))
-            .await?;
+        ctx.send(poise::CreateReply::default().ephemeral(true).content(
+            "Couldn't reach the trade site through the proxy — please try `/paste` again in a moment.",
+        ))
+        .await?;
         return Ok(());
     }
 
-    // Pull the stashed item and price it now.
-    let pending = ctx.data().pending.write().unwrap().remove(&uid);
-    match (pending, ctx.data().sessions.session_for(uid)) {
-        (Some((parsed_item, _)), Some(session)) => {
-            run_pricing(ctx, &parsed_item, league, &session).await
-        }
-        _ => {
+    // Session stored; price the item now using the in-scope parsed item.
+    match ctx.data().sessions.session_for(uid) {
+        Some(session) => run_pricing(ctx, parsed, league, &session).await,
+        None => {
             ctx.send(
                 poise::CreateReply::default()
                     .ephemeral(true)
-                    .content("Connected! Run `/paste` again to price your item."),
+                    .content("Connected — run `/paste` again to price your item."),
             )
             .await?;
             Ok(())
