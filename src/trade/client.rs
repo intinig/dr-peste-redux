@@ -390,7 +390,7 @@ mod tests {
         // "aug" is unconvertible → dropped; divine + chaos kept, both positive.
         assert_eq!(listings.len(), 2);
         assert!(listings.iter().all(|l| l.price_divine > 0.0));
-        // explicit_count comes from item.explicitMods length
+        // explicit_count via affix_count() — these fixtures have no `extended`, so it falls to the explicitMods line count
         let divine = listings.iter().find(|l| l.price.amount == 2.0).unwrap();
         assert_eq!(divine.explicit_count, 3);
         let chaos = listings.iter().find(|l| l.price.amount == 50.0).unwrap();
