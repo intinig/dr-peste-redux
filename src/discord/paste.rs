@@ -265,9 +265,11 @@ async fn prompt_connect(
     let cookie = secrecy::SecretString::new(modal.poesessid.trim().to_string());
     if let Err(e) = ctx.data().sessions.store(uid, cookie).await {
         tracing::warn!(error = %e, "session store/validation failed"); // never logs the cookie
-        ctx.send(poise::CreateReply::default().ephemeral(true).content(
-            "Couldn't reach the trade site through the proxy — please try `/paste` again in a moment.",
-        ))
+        ctx.send(
+            poise::CreateReply::default()
+                .ephemeral(true)
+                .content("Couldn't reach the trade site — please try `/paste` again in a moment."),
+        )
         .await?;
         return Ok(());
     }

@@ -109,9 +109,12 @@ impl MemberSessions {
         Ok(client)
     }
 
-    /// Validate connectivity (proxy reachable + trade responds) through the
-    /// member's client with the candidate cookie, then store it. On any failure
-    /// nothing is stored and a member-safe error is returned.
+    /// Validate connectivity (the trade site responds through the member's
+    /// client) with the candidate cookie, then store it. On any failure nothing
+    /// is stored and a member-safe error is returned. Note: this proves
+    /// reachability, not that the POESESSID is a valid logged-in session — the
+    /// trade endpoints also serve anonymous requests, so a present-but-invalid
+    /// cookie cannot be distinguished here and simply degrades to anonymous.
     pub async fn store(&self, user_id: u64, cookie: SecretString) -> Result<()> {
         let client = self.build_client(user_id)?;
         let url = format!("{TRADE_BASE}/data/leagues");
@@ -123,7 +126,7 @@ impl MemberSessions {
             .header(header::COOKIE, hv)
             .send()
             .await
-            .context("couldn't reach trade through the proxy")?;
+            .context("couldn't reach the trade site")?;
         resp.error_for_status()
             .context("trade rejected the request")?;
         self.sessions.write().unwrap().insert(
@@ -137,15 +140,34 @@ impl MemberSessions {
     }
 
     pub fn session_for(&self, user_id: u64) -> Option<TradeSession> {
-        let guard = self.sessions.read().unwrap();
-        let s = guard.get(&user_id)?;
-        if s.captured_at.elapsed() >= self.ttl {
-            return None;
+        // Classify the entry under a short read lock (returning owned data so
+        // the guard can drop before we take any write lock).
+        enum Found {
+            Live(Arc<SecretString>),
+            Expired,
+            Absent,
         }
-        let cookie = s.cookie.clone();
-        drop(guard);
-        let client = self.build_client(user_id).ok()?;
-        Some(TradeSession { client, cookie })
+        let found = {
+            let guard = self.sessions.read().unwrap();
+            match guard.get(&user_id) {
+                Some(s) if s.captured_at.elapsed() < self.ttl => Found::Live(s.cookie.clone()),
+                Some(_) => Found::Expired,
+                None => Found::Absent,
+            }
+        };
+        match found {
+            Found::Live(cookie) => {
+                let client = self.build_client(user_id).ok()?;
+                Some(TradeSession { client, cookie })
+            }
+            // Evict on TTL: drop the session + cached client so the cookie does
+            // not linger in memory past the advertised expiry window.
+            Found::Expired => {
+                self.forget(user_id);
+                None
+            }
+            Found::Absent => None,
+        }
     }
 
     pub fn forget(&self, user_id: u64) {
@@ -166,6 +188,11 @@ impl MemberSessions {
                 captured_at,
             },
         );
+    }
+
+    /// Number of stored sessions (test-only, for eviction assertions).
+    fn stored_count(&self) -> usize {
+        self.sessions.read().unwrap().len()
     }
 }
 
@@ -233,6 +260,15 @@ mod tests {
         let r = registry(Duration::ZERO); // ttl 0 ⇒ anything is already expired
         r.insert_test(9, Instant::now());
         assert!(r.session_for(9).is_none());
+    }
+
+    #[test]
+    fn session_for_evicts_expired() {
+        let r = registry(Duration::ZERO); // ttl 0 ⇒ already expired
+        r.insert_test(5, Instant::now());
+        assert_eq!(r.stored_count(), 1);
+        assert!(r.session_for(5).is_none());
+        assert_eq!(r.stored_count(), 0); // evicted from memory, not just hidden
     }
 
     #[test]
