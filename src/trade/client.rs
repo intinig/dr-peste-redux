@@ -12,8 +12,8 @@ use crate::trade::model::{Currency, Listing, Money, SearchResponse, TradeQuery};
 use crate::trade::query::to_payload;
 use crate::trade::rates::RateTable;
 
-const TRADE_BASE: &str = "https://www.pathofexile.com/api/trade2";
-const USER_AGENT: &str =
+pub(crate) const TRADE_BASE: &str = "https://www.pathofexile.com/api/trade2";
+pub(crate) const USER_AGENT: &str =
     "dr-peste-redux/0.1 (Discord guild price bot; not affiliated with Grinding Gear Games)";
 
 #[derive(Clone, Debug, PartialEq)]

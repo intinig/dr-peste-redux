@@ -7,6 +7,7 @@ pub mod model;
 pub mod pseudo;
 pub mod query;
 pub mod rates;
+pub mod session;
 pub mod stats;
 
 use anyhow::Result;
