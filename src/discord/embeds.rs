@@ -120,6 +120,27 @@ pub fn contribution_line(c: &Contribution) -> String {
     format!("• {} — ~{:.1} div", c.characteristic, c.delta_divine)
 }
 
+/// One-line description of which comparable set the estimate used.
+fn tier_note(parsed: &ParsedItem, est: &PriceEstimate) -> String {
+    use crate::trade::model::EstimateBasis::*;
+    match est.basis {
+        CraftTier => {
+            let c = parsed.craftability();
+            let open_p = c.map(|c| c.open_prefixes).unwrap_or(0);
+            let open_s = c.map(|c| c.open_suffixes).unwrap_or(0);
+            format!(
+                "clean base · {open_p} open prefix(es), {open_s} open suffix(es) · {} comparable listings",
+                est.listing_count
+            )
+        }
+        BroadMarket => "broad-market estimate — no comparable open-base listings".to_string(),
+        AffixesOnly => {
+            "affixes present; craftability not detected — paste in Advanced Mode for a sharper estimate"
+                .to_string()
+        }
+    }
+}
+
 pub fn estimate_embed(
     parsed: &ParsedItem,
     est: &PriceEstimate,
@@ -161,7 +182,8 @@ pub fn estimate_embed(
                     est.listing_count
                 ),
                 false,
-            );
+            )
+            .field("Priced as", tier_note(parsed, est), false);
     }
 
     embed.footer(serenity::CreateEmbedFooter::new(format!(
@@ -200,6 +222,8 @@ pub fn breakdown_embed(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::itemtext::parse;
+    use crate::trade::model::{Confidence, Currency, EstimateBasis, PriceEstimate};
 
     fn item(divine: f64, exalted: f64, chaos: f64) -> PricedItem {
         PricedItem {
@@ -216,6 +240,20 @@ mod tests {
             icon_url: None,
         }
     }
+
+    fn est(basis: EstimateBasis, n: usize) -> PriceEstimate {
+        PriceEstimate {
+            low: 1.0,
+            typical: 2.0,
+            high: 3.0,
+            listing_count: n,
+            confidence: Confidence::from_count(n),
+            modal_currency: Currency::Divine,
+            basis,
+        }
+    }
+
+    const BOOTS: &str = "Item Class: Boots\nRarity: Rare\nKraken Slippers\nSandsworn Sandals\n--------\nItem Level: 83\n--------\n{ Prefix Modifier \"Hellion's\" (Tier: 1) }\n35% increased Movement Speed\n{ Suffix Modifier \"of Archaeology\" (Tier: 1) }\n16% increased Rarity of Items found\n";
 
     #[test]
     fn price_string_picks_largest_sensible_unit() {
@@ -245,7 +283,7 @@ mod tests {
         );
     }
 
-    use crate::trade::model::{AblationKind, Confidence, Contribution};
+    use crate::trade::model::{AblationKind, Contribution};
 
     #[test]
     fn div_str_formats_by_magnitude() {
@@ -283,5 +321,20 @@ mod tests {
         let line = contribution_line(&c);
         assert!(line.contains("+to all Spell Skills"));
         assert!(line.contains("16"));
+    }
+
+    #[test]
+    fn tier_note_describes_craft_tier() {
+        let p = parse(BOOTS).unwrap();
+        let note = tier_note(&p, &est(EstimateBasis::CraftTier, 7));
+        assert!(note.contains("open prefix"), "{note}");
+        assert!(note.contains("7"), "{note}");
+    }
+
+    #[test]
+    fn tier_note_flags_broad_market() {
+        let p = parse(BOOTS).unwrap();
+        let note = tier_note(&p, &est(EstimateBasis::BroadMarket, 30));
+        assert!(note.to_lowercase().contains("broad-market"), "{note}");
     }
 }

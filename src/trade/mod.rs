@@ -21,8 +21,11 @@ use crate::trade::query::build_baseline;
 use crate::trade::session::TradeSession;
 use crate::trade::stats::StatCatalog;
 
-/// Number of cheapest listings to consider per query.
-const LISTING_LIMIT: usize = 10;
+/// Number of cheapest listings to fetch per query before craftability filtering.
+/// Widened so craft-tier comparables aren't crowded out by a deep junk floor before
+/// the filter runs. (A fuller fix — paginating further when no craft-tier survivors
+/// are found — is tracked as a follow-up.)
+const COMPARABLE_SAMPLE: usize = 50;
 /// Number of characteristics to ablate in a breakdown.
 const TOP_K: usize = 4;
 
@@ -50,7 +53,15 @@ impl<C: Comparables> TradePricer<C> {
         session: &TradeSession,
     ) -> Result<PriceEstimate> {
         let query = build_baseline(item, &self.pseudo, &self.catalog, league);
-        let est = estimate(&self.comparables, &query, LISTING_LIMIT, session).await?;
+        let max_explicit = item.craftability().map(|c| c.explicit_count as usize);
+        let est = estimate(
+            &self.comparables,
+            &query,
+            COMPARABLE_SAMPLE,
+            session,
+            max_explicit,
+        )
+        .await?;
         self.record(&query, &est);
         Ok(est)
     }
@@ -62,12 +73,14 @@ impl<C: Comparables> TradePricer<C> {
         session: &TradeSession,
     ) -> Result<Breakdown> {
         let query = build_baseline(item, &self.pseudo, &self.catalog, league);
+        let max_explicit = item.craftability().map(|c| c.explicit_count as usize);
         let bd = crate::trade::ablation::breakdown(
             &self.comparables,
             &query,
-            LISTING_LIMIT,
+            COMPARABLE_SAMPLE,
             TOP_K,
             session,
+            max_explicit,
         )
         .await?;
         self.record(&query, &bd.baseline);
@@ -115,7 +128,8 @@ mod tests {
                         amount: self.0,
                         currency: Currency::Divine
                     },
-                    price_divine: self.0
+                    price_divine: self.0,
+                    explicit_count: 0,
                 };
                 8
             ])
@@ -140,6 +154,7 @@ mod tests {
             explicits: vec![ItemStat {
                 raw: "+40 to maximum Life".into(),
                 value: Some(40.0),
+                affix: None,
             }],
         }
     }

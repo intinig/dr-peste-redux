@@ -1,3 +1,9 @@
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Affix {
+    Prefix,
+    Suffix,
+}
+
 /// Rarity as reported by the in-game clipboard "Rarity:" line.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum Rarity {
@@ -32,6 +38,9 @@ pub struct ParsedItem {
 pub struct ItemStat {
     pub raw: String,
     pub value: Option<f64>,
+    /// Prefix/Suffix when known (Advanced-Mode `{ … Modifier … }` annotation);
+    /// `None` for implicit/enchant/rune lines and for basic-clipboard pastes.
+    pub affix: Option<Affix>,
 }
 
 fn is_separator(s: &str) -> bool {
@@ -169,23 +178,42 @@ pub fn parse(text: &str) -> Option<ParsedItem> {
     let mut runes = Vec::new();
     let mut explicits = Vec::new();
 
+    let mut current_affix: Option<Affix> = None;
     for (i, raw_line) in lines.iter().enumerate() {
         if i == idx || i == idx + 1 || i == idx + 2 {
             continue; // rarity, name, base type
         }
+        // Advanced-Mode affix annotations set the type for the next stat line(s).
+        if raw_line.starts_with('{') {
+            let lower = raw_line.to_lowercase();
+            current_affix = if lower.contains("prefix modifier") {
+                Some(Affix::Prefix)
+            } else if lower.contains("suffix modifier") {
+                Some(Affix::Suffix)
+            } else {
+                None // implicit/enchant/rune/other block — not a prefix/suffix
+            };
+            continue;
+        }
         if is_meta_line(raw_line) {
+            current_affix = None; // separators/properties break an affix block
             continue;
         }
         let (clean, tag) = split_tag(raw_line);
         let stat = ItemStat {
             value: first_number(&clean),
             raw: clean,
+            affix: None,
         };
         match tag.as_deref() {
             Some("implicit") => implicits.push(stat),
             Some("enchant") => enchants.push(stat),
             Some("rune") => runes.push(stat),
-            _ => explicits.push(stat),
+            _ => {
+                let mut s = stat;
+                s.affix = current_affix;
+                explicits.push(s);
+            }
         }
     }
 
@@ -205,6 +233,44 @@ pub fn parse(text: &str) -> Option<ParsedItem> {
         runes,
         explicits,
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Craftability {
+    pub filled_prefixes: u8,
+    pub filled_suffixes: u8,
+    pub open_prefixes: u8,
+    pub open_suffixes: u8,
+    /// Number of filled prefix+suffix explicit mods (the craftability-filter key).
+    pub explicit_count: u8,
+}
+
+impl ParsedItem {
+    /// Prefix/suffix slot usage, derived from Advanced-Mode affix tags.
+    /// Returns `None` when no explicit carries an affix tag (basic clipboard),
+    /// so callers can fall back to affix-content-only pricing.
+    pub fn craftability(&self) -> Option<Craftability> {
+        if !self.explicits.iter().any(|s| s.affix.is_some()) {
+            return None;
+        }
+        let filled_prefixes = self
+            .explicits
+            .iter()
+            .filter(|s| s.affix == Some(Affix::Prefix))
+            .count() as u8;
+        let filled_suffixes = self
+            .explicits
+            .iter()
+            .filter(|s| s.affix == Some(Affix::Suffix))
+            .count() as u8;
+        Some(Craftability {
+            filled_prefixes,
+            filled_suffixes,
+            open_prefixes: 3u8.saturating_sub(filled_prefixes),
+            open_suffixes: 3u8.saturating_sub(filled_suffixes),
+            explicit_count: filled_prefixes + filled_suffixes,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -335,5 +401,37 @@ mod tests {
         assert_eq!(p.evasion, Some(320));
         // the "Evasion Rating:" property line is not treated as a mod
         assert!(p.explicits.iter().all(|s| !s.raw.contains("Evasion")));
+    }
+
+    #[test]
+    fn craftability_of_advanced_boots() {
+        let p = parse(RARE_BOOTS_ADVANCED).unwrap();
+        let c = p.craftability().expect("advanced-mode tags present");
+        assert_eq!(c.filled_prefixes, 1); // 35% Movement Speed
+        assert_eq!(c.filled_suffixes, 3); // 2 resists + rarity
+        assert_eq!(c.open_prefixes, 2); // the two empty prefixes
+        assert_eq!(c.open_suffixes, 0);
+        assert_eq!(c.explicit_count, 4);
+        // affix tags landed on the right explicits
+        let ms = p
+            .explicits
+            .iter()
+            .find(|s| s.raw.contains("Movement Speed"))
+            .unwrap();
+        assert_eq!(ms.affix, Some(Affix::Prefix));
+        let rarity = p
+            .explicits
+            .iter()
+            .find(|s| s.raw.contains("Rarity of Items found"))
+            .unwrap();
+        assert_eq!(rarity.affix, Some(Affix::Suffix));
+    }
+
+    #[test]
+    fn craftability_none_for_basic_clipboard() {
+        // RARE_RING has no `{ … Modifier … }` annotations → no affix tags.
+        let p = parse(RARE_RING).unwrap();
+        assert!(p.explicits.iter().all(|s| s.affix.is_none()));
+        assert!(p.craftability().is_none());
     }
 }

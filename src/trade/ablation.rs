@@ -6,8 +6,8 @@ use async_trait::async_trait;
 
 use crate::trade::client::TradeApi;
 use crate::trade::model::{
-    AblationKind, Breakdown, Confidence, Contribution, Currency, Listing, PriceEstimate,
-    SynergyNote, TradeQuery,
+    AblationKind, Breakdown, Confidence, Contribution, Currency, EstimateBasis, Listing,
+    PriceEstimate, SynergyNote, TradeQuery,
 };
 use crate::trade::session::TradeSession;
 
@@ -26,6 +26,11 @@ pub trait Comparables {
 /// Hard cap on how many stats a single breakdown will probe, to bound the
 /// query budget for pathological items. Normal rares have far fewer.
 const PROBE_CEILING: usize = 16;
+
+/// Bottom fraction of (sorted-ascending) comparables dropped as dump/troll outliers.
+const TRIM_BOTTOM_FRAC: f64 = 0.10;
+/// Only trim when at least this many comparables survive the craftability filter.
+const TRIM_MIN_N: usize = 8;
 
 /// Searches + fetches up to `limit` cheapest listings. If fewer than `limit`
 /// are found, relaxes the query (drops the last stat filter, then the last
@@ -63,17 +68,43 @@ pub async fn gather_comparables<A: TradeApi + ?Sized>(
     }
 }
 
-/// Cheapest, typical (low-percentile), and high prices over the comparables,
-/// all in divine. `typical` is the cheapest (asking-price floor) — the most
-/// defensible single number for "what it sells for".
+/// Keep listings in the same-or-more-open craftability tier as our item: those
+/// with no extra explicit mods beyond the ones the search already pinned.
+/// `explicit_count == 0` is the "unknown/absent mods" sentinel from `parse_fetch`
+/// (a real matching rare always has ≥1 explicit), so exclude it rather than treat
+/// it as the most-craftable tier — that keeps the junk floor out when mod data is
+/// missing (the sample then falls back to BroadMarket).
+fn craftability_filter(listings: &[Listing], max_explicit: usize) -> Vec<Listing> {
+    listings
+        .iter()
+        .filter(|l| l.explicit_count >= 1 && l.explicit_count <= max_explicit)
+        .cloned()
+        .collect()
+}
+
+/// Price comparables for `query`, filtering to the item's craftability tier when
+/// `max_explicit` is `Some` (falling back to a broad-market estimate if no
+/// comparable bases survive, or to affixes-only when craftability is unknown).
 pub async fn estimate<C: Comparables + ?Sized>(
     c: &C,
     query: &TradeQuery,
     limit: usize,
     session: &TradeSession,
+    max_explicit: Option<usize>,
 ) -> Result<PriceEstimate> {
     let listings = c.comparables(query, limit, session).await?;
-    Ok(estimate_from(&listings))
+    let est = match max_explicit {
+        None => estimate_from(&listings, EstimateBasis::AffixesOnly),
+        Some(max) => {
+            let kept = craftability_filter(&listings, max);
+            if kept.is_empty() {
+                estimate_from(&listings, EstimateBasis::BroadMarket)
+            } else {
+                estimate_from(&kept, EstimateBasis::CraftTier)
+            }
+        }
+    };
+    Ok(est)
 }
 
 /// Linear-interpolation percentile of an ascending-sorted slice. `p` in [0,1].
@@ -107,41 +138,64 @@ fn modal_currency(listings: &[Listing]) -> Currency {
     }
 }
 
-fn estimate_from(listings: &[Listing]) -> PriceEstimate {
+fn estimate_from(listings: &[Listing], basis: EstimateBasis) -> PriceEstimate {
     let mut prices: Vec<f64> = listings.iter().map(|l| l.price_divine).collect();
     prices.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let n = prices.len();
-    let (low, typical, high) = if n == 0 {
+
+    // Trim the cheapest outliers (dump/troll listings) when we have enough.
+    // Drop at least one when trimming, so small samples (n = 8, 9) still shed the
+    // floor instead of floor(n*0.10) rounding to zero.
+    let priced: &[f64] = if prices.len() >= TRIM_MIN_N {
+        let drop = (((prices.len() as f64) * TRIM_BOTTOM_FRAC).floor() as usize).max(1);
+        &prices[drop..]
+    } else {
+        &prices[..]
+    };
+
+    let (low, typical, high) = if priced.is_empty() {
         (0.0, 0.0, 0.0)
     } else {
-        let low = percentile(&prices, 0.10);
-        let typical = percentile(&prices, 0.25);
-        let high = percentile(&prices, 0.75);
-        (low, typical, high)
+        (
+            percentile(priced, 0.20),
+            percentile(priced, 0.50),
+            percentile(priced, 0.80),
+        )
     };
+    // BroadMarket means "no comparable craft-tier bases were found" — never present
+    // that as high confidence even if the broad sample is large.
+    let confidence = if matches!(basis, EstimateBasis::BroadMarket) {
+        Confidence::Low
+    } else {
+        Confidence::from_count(listings.len())
+    };
+    // listing_count reports the comparable set size (pre-trim) — trimming is an
+    // internal outlier guard, not a change to "how many comps we found".
     PriceEstimate {
         low,
         typical,
         high,
-        listing_count: n,
-        confidence: Confidence::from_count(n),
+        listing_count: listings.len(),
+        confidence,
         modal_currency: modal_currency(listings),
+        basis,
     }
 }
 
 /// Ablate every stat filter (up to `PROBE_CEILING`), rank by measured price delta,
 /// and display the top-`k`; plus one pairwise probe on the top two for synergy.
+/// All probes share `max_explicit`, so deltas compare the same craftability tier.
 ///
 /// Query budget per call: 1 baseline + min(n, ceiling) single-drops + 1 pairwise
-/// (deduplicated by the client's query cache).
+/// (deduplicated by the client's 60s query cache).
 pub async fn breakdown<C: Comparables + ?Sized>(
     c: &C,
     query: &TradeQuery,
     limit: usize,
     k: usize,
     session: &TradeSession,
+    max_explicit: Option<usize>,
 ) -> Result<Breakdown> {
-    let baseline = estimate(c, query, limit, session).await?;
+    let baseline = estimate(c, query, limit, session, max_explicit).await?;
 
     // Probe every stat up to the ceiling so ranking is by measured impact.
     let probe_count = query.stats.len().min(PROBE_CEILING);
@@ -151,7 +205,7 @@ pub async fn breakdown<C: Comparables + ?Sized>(
         let sf = &query.stats[i];
         let mut q = query.clone();
         q.stats.remove(i);
-        let without = estimate(c, &q, limit, session).await?;
+        let without = estimate(c, &q, limit, session, max_explicit).await?;
         ranked.push(Contribution {
             characteristic: sf.label.clone(),
             kind: AblationKind::Drop,
@@ -179,7 +233,7 @@ pub async fn breakdown<C: Comparables + ?Sized>(
                 let (hi, lo) = if ai > bi { (ai, bi) } else { (bi, ai) };
                 q.stats.remove(hi);
                 q.stats.remove(lo);
-                let without_both = estimate(c, &q, limit, session).await?;
+                let without_both = estimate(c, &q, limit, session, max_explicit).await?;
                 let drop_both = baseline.typical - without_both.typical;
                 let sum_individual = ranked[0].delta_divine + ranked[1].delta_divine;
                 // Super-additive synergy: A and B are worth more together than apart.
@@ -242,8 +296,8 @@ mod tests {
     use super::*;
     use crate::trade::client::TradeApi;
     use crate::trade::model::{
-        AblationKind, Confidence, Currency, Listing, MiscFilters, Money, SearchResponse,
-        StatFilter, TradeQuery,
+        AblationKind, Confidence, Currency, EstimateBasis, Listing, MiscFilters, Money,
+        SearchResponse, StatFilter, TradeQuery,
     };
     use crate::trade::session::TradeSession;
     use async_trait::async_trait;
@@ -256,7 +310,39 @@ mod tests {
                 currency: Currency::Divine,
             },
             price_divine: divine,
+            explicit_count: 0,
         }
+    }
+
+    fn listing_ec(divine: f64, explicit_count: usize) -> Listing {
+        Listing {
+            price: Money {
+                amount: divine,
+                currency: Currency::Divine,
+            },
+            price_divine: divine,
+            explicit_count,
+        }
+    }
+
+    #[test]
+    fn estimate_trims_bottom_and_uses_p20_p50_p80() {
+        // 10 listings 1..=10 div. Trim bottom 10% (drop the 1.0), then
+        // p20/p50/p80 over [2..10]; listing_count still reports the full 10.
+        let ls: Vec<Listing> = (1..=10).map(|i| listing_ec(i as f64, 4)).collect();
+        let est = estimate_from(&ls, EstimateBasis::CraftTier);
+        assert_eq!(est.basis, EstimateBasis::CraftTier);
+        assert_eq!(est.listing_count, 10); // pre-trim comparable count
+        assert!(est.low < est.typical && est.typical < est.high);
+        assert!((est.typical - 6.0).abs() < 0.001); // median of [2..10] = 6
+    }
+
+    #[test]
+    fn estimate_no_trim_when_below_min_n() {
+        let ls = vec![listing_ec(2.0, 4), listing_ec(4.0, 4), listing_ec(6.0, 4)];
+        let est = estimate_from(&ls, EstimateBasis::BroadMarket);
+        assert_eq!(est.listing_count, 3); // < TRIM_MIN_N → no trim
+        assert!((est.typical - 4.0).abs() < 0.001); // median of [2,4,6] = 4
     }
 
     /// Fake low-level API: returns listings whose count/prices depend on how
@@ -416,6 +502,7 @@ mod tests {
             &two_stat_query(),
             10,
             &TradeSession::for_test(),
+            None,
         )
         .await
         .unwrap();
@@ -454,7 +541,7 @@ mod tests {
             calls: calls.clone(),
         };
         // 6 stats, k=4, ceiling=16 → 1 baseline + 6 single-drops + 1 pairwise = 8
-        let bd = breakdown(&fake, &q, 10, 4, &TradeSession::for_test())
+        let bd = breakdown(&fake, &q, 10, 4, &TradeSession::for_test(), None)
             .await
             .unwrap();
         let n = calls.load(std::sync::atomic::Ordering::SeqCst);
@@ -470,6 +557,7 @@ mod tests {
             10,
             2,
             &TradeSession::for_test(),
+            None,
         )
         .await
         .unwrap();
@@ -488,6 +576,132 @@ mod tests {
         assert_eq!(super::percentile(&[10.0, 20.0, 30.0, 40.0], 0.25), 17.5);
         assert_eq!(super::percentile(&[10.0], 0.5), 10.0);
         assert_eq!(super::percentile(&[], 0.5), 0.0);
+    }
+
+    struct FixedListings(Vec<Listing>);
+    #[async_trait]
+    impl Comparables for FixedListings {
+        async fn comparables(
+            &self,
+            _q: &TradeQuery,
+            _limit: usize,
+            _session: &TradeSession,
+        ) -> anyhow::Result<Vec<Listing>> {
+            Ok(self.0.clone())
+        }
+    }
+
+    #[test]
+    fn craftability_filter_keeps_same_or_more_open() {
+        let ls = vec![
+            listing_ec(2.0, 4),  // our tier (clean base, explicit_count == ours)
+            listing_ec(0.05, 6), // bad-filled (more mods) → dropped
+            listing_ec(1.5, 3),  // cleaner (fewer mods) → kept
+            listing_ec(0.04, 5), // more-filled → dropped
+        ];
+        let kept = craftability_filter(&ls, 4);
+        assert_eq!(kept.len(), 2);
+        assert!(kept.iter().all(|l| l.explicit_count <= 4));
+    }
+
+    #[tokio::test]
+    async fn estimate_filters_to_craft_tier_not_floor() {
+        // Junk floor (cheap, 6 mods) vs open-tier bases (~2 div, 4 mods).
+        // Filtering to explicit_count<=4 must ignore the floor.
+        let mut ls = vec![
+            listing_ec(0.03, 6),
+            listing_ec(0.04, 6),
+            listing_ec(0.05, 6),
+        ];
+        ls.extend((0..8).map(|i| listing_ec(1.8 + i as f64 * 0.1, 4))); // ~1.8–2.5
+        let c = FixedListings(ls);
+        let est = estimate(
+            &c,
+            &two_stat_query(),
+            30,
+            &TradeSession::for_test(),
+            Some(4),
+        )
+        .await
+        .unwrap();
+        assert_eq!(est.basis, EstimateBasis::CraftTier);
+        assert!(
+            est.typical >= 1.5,
+            "fair {} should reflect open tier, not the 0.05 floor",
+            est.typical
+        );
+    }
+
+    #[tokio::test]
+    async fn estimate_falls_back_to_broad_market_when_no_comparable_bases() {
+        // Every listing is more-filled than ours → 0 survivors → BroadMarket.
+        let c = FixedListings(vec![
+            listing_ec(0.03, 6),
+            listing_ec(0.04, 6),
+            listing_ec(0.05, 6),
+        ]);
+        let est = estimate(
+            &c,
+            &two_stat_query(),
+            30,
+            &TradeSession::for_test(),
+            Some(4),
+        )
+        .await
+        .unwrap();
+        assert_eq!(est.basis, EstimateBasis::BroadMarket);
+        assert!(est.typical > 0.0);
+    }
+
+    #[tokio::test]
+    async fn estimate_affixes_only_when_craftability_unknown() {
+        let c = FixedListings(vec![listing_ec(0.03, 6), listing_ec(2.0, 4)]);
+        let est = estimate(&c, &two_stat_query(), 30, &TradeSession::for_test(), None)
+            .await
+            .unwrap();
+        assert_eq!(est.basis, EstimateBasis::AffixesOnly);
+    }
+
+    #[test]
+    fn trim_drops_at_least_one_at_min_n() {
+        // n = 8 (== TRIM_MIN_N): floor(8*0.10)=0, but we must still drop ≥1.
+        let ls: Vec<Listing> = (1..=8).map(|i| listing_ec(i as f64, 4)).collect();
+        let est = estimate_from(&ls, EstimateBasis::CraftTier);
+        assert_eq!(est.listing_count, 8); // pre-trim count
+        assert!((est.typical - 5.0).abs() < 0.001); // median of [2..=8] (cheapest dropped)
+    }
+
+    #[test]
+    fn craftability_filter_excludes_unknown_zero() {
+        let ls = vec![listing_ec(2.0, 0), listing_ec(2.0, 4), listing_ec(2.0, 6)];
+        let kept = craftability_filter(&ls, 4);
+        assert_eq!(kept.len(), 1); // ec=0 (unknown) and ec=6 (more-filled) both excluded
+        assert_eq!(kept[0].explicit_count, 4);
+    }
+
+    #[tokio::test]
+    async fn estimate_all_unknown_falls_back_to_broad_market() {
+        // explicitMods missing on every listing → all ec=0 → none survive the
+        // craft-tier filter → BroadMarket (not a CraftTier estimate over the floor).
+        let c = FixedListings(vec![listing_ec(0.05, 0), listing_ec(0.04, 0)]);
+        let est = estimate(
+            &c,
+            &two_stat_query(),
+            30,
+            &TradeSession::for_test(),
+            Some(4),
+        )
+        .await
+        .unwrap();
+        assert_eq!(est.basis, EstimateBasis::BroadMarket);
+    }
+
+    #[test]
+    fn broad_market_forces_low_confidence() {
+        // 12 listings would be High via from_count, but BroadMarket must read Low.
+        let ls: Vec<Listing> = (1..=12).map(|i| listing_ec(i as f64, 6)).collect();
+        let est = estimate_from(&ls, EstimateBasis::BroadMarket);
+        assert_eq!(est.confidence, Confidence::Low);
     }
 
     #[test]
