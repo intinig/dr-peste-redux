@@ -57,6 +57,7 @@ pub struct TradeSession {
 
 impl TradeSession {
     /// Offline test handle: a default client + dummy secret.
+    #[cfg(test)]
     pub fn for_test() -> TradeSession {
         TradeSession {
             client: Arc::new(reqwest::Client::new()),

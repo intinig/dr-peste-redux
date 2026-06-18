@@ -113,6 +113,7 @@ async fn main() -> Result<()> {
                 discord::price::price(),
                 discord::farm::farm(),
                 discord::paste::paste(),
+                discord::logout::logout(),
                 discord::help::help(),
             ],
             ..Default::default()

@@ -1,6 +1,7 @@
 pub mod embeds;
 pub mod farm;
 pub mod help;
+pub mod logout;
 pub mod paste;
 pub mod price;
 

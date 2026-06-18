@@ -22,6 +22,16 @@ pub async fn help(ctx: Context<'_>) -> Result<(), Error> {
             "Most valuable items, or the biggest movers (sort: value or trending).",
             false,
         )
+        .field(
+            "/paste (first time)",
+            "On your first rare price-check, the bot asks for your POESESSID (kept in memory only) so it can search trade as you.",
+            false,
+        )
+        .field(
+            "/logout",
+            "Remove your stored session from the bot.",
+            false,
+        )
         .field("/help", "Show this message.", false)
         .footer(serenity::CreateEmbedFooter::new(
             "Data from poe.ninja • prices update periodically",
