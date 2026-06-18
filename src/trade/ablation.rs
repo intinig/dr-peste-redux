@@ -68,12 +68,16 @@ pub async fn gather_comparables<A: TradeApi + ?Sized>(
     }
 }
 
-/// Keep listings in the same-or-more-open craftability tier as our item:
-/// those with no extra explicit mods beyond the ones the search already pinned.
+/// Keep listings in the same-or-more-open craftability tier as our item: those
+/// with no extra explicit mods beyond the ones the search already pinned.
+/// `explicit_count == 0` is the "unknown/absent mods" sentinel from `parse_fetch`
+/// (a real matching rare always has ≥1 explicit), so exclude it rather than treat
+/// it as the most-craftable tier — that keeps the junk floor out when mod data is
+/// missing (the sample then falls back to BroadMarket).
 fn craftability_filter(listings: &[Listing], max_explicit: usize) -> Vec<Listing> {
     listings
         .iter()
-        .filter(|l| l.explicit_count <= max_explicit)
+        .filter(|l| l.explicit_count >= 1 && l.explicit_count <= max_explicit)
         .cloned()
         .collect()
 }
@@ -139,8 +143,10 @@ fn estimate_from(listings: &[Listing], basis: EstimateBasis) -> PriceEstimate {
     prices.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
     // Trim the cheapest outliers (dump/troll listings) when we have enough.
+    // Drop at least one when trimming, so small samples (n = 8, 9) still shed the
+    // floor instead of floor(n*0.10) rounding to zero.
     let priced: &[f64] = if prices.len() >= TRIM_MIN_N {
-        let drop = ((prices.len() as f64) * TRIM_BOTTOM_FRAC).floor() as usize;
+        let drop = (((prices.len() as f64) * TRIM_BOTTOM_FRAC).floor() as usize).max(1);
         &prices[drop..]
     } else {
         &prices[..]
@@ -155,6 +161,13 @@ fn estimate_from(listings: &[Listing], basis: EstimateBasis) -> PriceEstimate {
             percentile(priced, 0.80),
         )
     };
+    // BroadMarket means "no comparable craft-tier bases were found" — never present
+    // that as high confidence even if the broad sample is large.
+    let confidence = if matches!(basis, EstimateBasis::BroadMarket) {
+        Confidence::Low
+    } else {
+        Confidence::from_count(listings.len())
+    };
     // listing_count reports the comparable set size (pre-trim) — trimming is an
     // internal outlier guard, not a change to "how many comps we found".
     PriceEstimate {
@@ -162,7 +175,7 @@ fn estimate_from(listings: &[Listing], basis: EstimateBasis) -> PriceEstimate {
         typical,
         high,
         listing_count: listings.len(),
-        confidence: Confidence::from_count(listings.len()),
+        confidence,
         modal_currency: modal_currency(listings),
         basis,
     }
@@ -647,6 +660,48 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(est.basis, EstimateBasis::AffixesOnly);
+    }
+
+    #[test]
+    fn trim_drops_at_least_one_at_min_n() {
+        // n = 8 (== TRIM_MIN_N): floor(8*0.10)=0, but we must still drop ≥1.
+        let ls: Vec<Listing> = (1..=8).map(|i| listing_ec(i as f64, 4)).collect();
+        let est = estimate_from(&ls, EstimateBasis::CraftTier);
+        assert_eq!(est.listing_count, 8); // pre-trim count
+        assert!((est.typical - 5.0).abs() < 0.001); // median of [2..=8] (cheapest dropped)
+    }
+
+    #[test]
+    fn craftability_filter_excludes_unknown_zero() {
+        let ls = vec![listing_ec(2.0, 0), listing_ec(2.0, 4), listing_ec(2.0, 6)];
+        let kept = craftability_filter(&ls, 4);
+        assert_eq!(kept.len(), 1); // ec=0 (unknown) and ec=6 (more-filled) both excluded
+        assert_eq!(kept[0].explicit_count, 4);
+    }
+
+    #[tokio::test]
+    async fn estimate_all_unknown_falls_back_to_broad_market() {
+        // explicitMods missing on every listing → all ec=0 → none survive the
+        // craft-tier filter → BroadMarket (not a CraftTier estimate over the floor).
+        let c = FixedListings(vec![listing_ec(0.05, 0), listing_ec(0.04, 0)]);
+        let est = estimate(
+            &c,
+            &two_stat_query(),
+            30,
+            &TradeSession::for_test(),
+            Some(4),
+        )
+        .await
+        .unwrap();
+        assert_eq!(est.basis, EstimateBasis::BroadMarket);
+    }
+
+    #[test]
+    fn broad_market_forces_low_confidence() {
+        // 12 listings would be High via from_count, but BroadMarket must read Low.
+        let ls: Vec<Listing> = (1..=12).map(|i| listing_ec(i as f64, 6)).collect();
+        let est = estimate_from(&ls, EstimateBasis::BroadMarket);
+        assert_eq!(est.confidence, Confidence::Low);
     }
 
     #[test]

@@ -22,7 +22,10 @@ use crate::trade::session::TradeSession;
 use crate::trade::stats::StatCatalog;
 
 /// Number of cheapest listings to fetch per query before craftability filtering.
-const COMPARABLE_SAMPLE: usize = 30;
+/// Widened so craft-tier comparables aren't crowded out by a deep junk floor before
+/// the filter runs. (A fuller fix — paginating further when no craft-tier survivors
+/// are found — is tracked as a follow-up.)
+const COMPARABLE_SAMPLE: usize = 50;
 /// Number of characteristics to ablate in a breakdown.
 const TOP_K: usize = 4;
 
