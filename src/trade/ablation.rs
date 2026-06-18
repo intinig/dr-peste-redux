@@ -6,8 +6,8 @@ use async_trait::async_trait;
 
 use crate::trade::client::TradeApi;
 use crate::trade::model::{
-    AblationKind, Breakdown, Confidence, Contribution, Currency, Listing, PriceEstimate,
-    SynergyNote, TradeQuery,
+    AblationKind, Breakdown, Confidence, Contribution, Currency, EstimateBasis, Listing,
+    PriceEstimate, SynergyNote, TradeQuery,
 };
 use crate::trade::session::TradeSession;
 
@@ -26,6 +26,11 @@ pub trait Comparables {
 /// Hard cap on how many stats a single breakdown will probe, to bound the
 /// query budget for pathological items. Normal rares have far fewer.
 const PROBE_CEILING: usize = 16;
+
+/// Bottom fraction of (sorted-ascending) comparables dropped as dump/troll outliers.
+const TRIM_BOTTOM_FRAC: f64 = 0.10;
+/// Only trim when at least this many comparables survive the craftability filter.
+const TRIM_MIN_N: usize = 8;
 
 /// Searches + fetches up to `limit` cheapest listings. If fewer than `limit`
 /// are found, relaxes the query (drops the last stat filter, then the last
@@ -73,7 +78,7 @@ pub async fn estimate<C: Comparables + ?Sized>(
     session: &TradeSession,
 ) -> Result<PriceEstimate> {
     let listings = c.comparables(query, limit, session).await?;
-    Ok(estimate_from(&listings))
+    Ok(estimate_from(&listings, EstimateBasis::AffixesOnly))
 }
 
 /// Linear-interpolation percentile of an ascending-sorted slice. `p` in [0,1].
@@ -107,25 +112,37 @@ fn modal_currency(listings: &[Listing]) -> Currency {
     }
 }
 
-fn estimate_from(listings: &[Listing]) -> PriceEstimate {
+fn estimate_from(listings: &[Listing], basis: EstimateBasis) -> PriceEstimate {
     let mut prices: Vec<f64> = listings.iter().map(|l| l.price_divine).collect();
     prices.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let n = prices.len();
-    let (low, typical, high) = if n == 0 {
+
+    // Trim the cheapest outliers (dump/troll listings) when we have enough.
+    let priced: &[f64] = if prices.len() >= TRIM_MIN_N {
+        let drop = ((prices.len() as f64) * TRIM_BOTTOM_FRAC).floor() as usize;
+        &prices[drop..]
+    } else {
+        &prices[..]
+    };
+
+    let (low, typical, high) = if priced.is_empty() {
         (0.0, 0.0, 0.0)
     } else {
-        let low = percentile(&prices, 0.10);
-        let typical = percentile(&prices, 0.25);
-        let high = percentile(&prices, 0.75);
-        (low, typical, high)
+        (
+            percentile(priced, 0.20),
+            percentile(priced, 0.50),
+            percentile(priced, 0.80),
+        )
     };
+    // listing_count reports the comparable set size (pre-trim) — trimming is an
+    // internal outlier guard, not a change to "how many comps we found".
     PriceEstimate {
         low,
         typical,
         high,
-        listing_count: n,
-        confidence: Confidence::from_count(n),
+        listing_count: listings.len(),
+        confidence: Confidence::from_count(listings.len()),
         modal_currency: modal_currency(listings),
+        basis,
     }
 }
 
@@ -242,8 +259,8 @@ mod tests {
     use super::*;
     use crate::trade::client::TradeApi;
     use crate::trade::model::{
-        AblationKind, Confidence, Currency, Listing, MiscFilters, Money, SearchResponse,
-        StatFilter, TradeQuery,
+        AblationKind, Confidence, Currency, EstimateBasis, Listing, MiscFilters, Money,
+        SearchResponse, StatFilter, TradeQuery,
     };
     use crate::trade::session::TradeSession;
     use async_trait::async_trait;
@@ -258,6 +275,37 @@ mod tests {
             price_divine: divine,
             explicit_count: 0,
         }
+    }
+
+    fn listing_ec(divine: f64, explicit_count: usize) -> Listing {
+        Listing {
+            price: Money {
+                amount: divine,
+                currency: Currency::Divine,
+            },
+            price_divine: divine,
+            explicit_count,
+        }
+    }
+
+    #[test]
+    fn estimate_trims_bottom_and_uses_p20_p50_p80() {
+        // 10 listings 1..=10 div. Trim bottom 10% (drop the 1.0), then
+        // p20/p50/p80 over [2..10]; listing_count still reports the full 10.
+        let ls: Vec<Listing> = (1..=10).map(|i| listing_ec(i as f64, 4)).collect();
+        let est = estimate_from(&ls, EstimateBasis::CraftTier);
+        assert_eq!(est.basis, EstimateBasis::CraftTier);
+        assert_eq!(est.listing_count, 10); // pre-trim comparable count
+        assert!(est.low < est.typical && est.typical < est.high);
+        assert!((est.typical - 6.0).abs() < 0.001); // median of [2..10] = 6
+    }
+
+    #[test]
+    fn estimate_no_trim_when_below_min_n() {
+        let ls = vec![listing_ec(2.0, 4), listing_ec(4.0, 4), listing_ec(6.0, 4)];
+        let est = estimate_from(&ls, EstimateBasis::BroadMarket);
+        assert_eq!(est.listing_count, 3); // < TRIM_MIN_N → no trim
+        assert!((est.typical - 4.0).abs() < 0.001); // median of [2,4,6] = 4
     }
 
     /// Fake low-level API: returns listings whose count/prices depend on how

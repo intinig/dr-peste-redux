@@ -98,6 +98,17 @@ pub enum Confidence {
     Low,
 }
 
+/// Which comparable set the estimate was computed over.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EstimateBasis {
+    /// Filtered to the item's craftability tier (the normal, sharp path).
+    CraftTier,
+    /// Craftability known but no comparable bases listed → broad-market sample.
+    BroadMarket,
+    /// Craftability unknown (basic clipboard) → unfiltered, affixes-only.
+    AffixesOnly,
+}
+
 impl Confidence {
     /// High ≥ 10 listings, Medium ≥ 3, else Low.
     pub fn from_count(n: usize) -> Self {
@@ -119,6 +130,7 @@ pub struct PriceEstimate {
     pub listing_count: usize,
     pub confidence: Confidence,
     pub modal_currency: Currency,
+    pub basis: EstimateBasis,
 }
 
 /// Describes how a stat filter was ablated in a breakdown probe.

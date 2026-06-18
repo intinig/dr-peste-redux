@@ -21,8 +21,8 @@ use crate::trade::query::build_baseline;
 use crate::trade::session::TradeSession;
 use crate::trade::stats::StatCatalog;
 
-/// Number of cheapest listings to consider per query.
-const LISTING_LIMIT: usize = 10;
+/// Number of cheapest listings to fetch per query before craftability filtering.
+const COMPARABLE_SAMPLE: usize = 30;
 /// Number of characteristics to ablate in a breakdown.
 const TOP_K: usize = 4;
 
@@ -50,7 +50,7 @@ impl<C: Comparables> TradePricer<C> {
         session: &TradeSession,
     ) -> Result<PriceEstimate> {
         let query = build_baseline(item, &self.pseudo, &self.catalog, league);
-        let est = estimate(&self.comparables, &query, LISTING_LIMIT, session).await?;
+        let est = estimate(&self.comparables, &query, COMPARABLE_SAMPLE, session).await?;
         self.record(&query, &est);
         Ok(est)
     }
@@ -65,7 +65,7 @@ impl<C: Comparables> TradePricer<C> {
         let bd = crate::trade::ablation::breakdown(
             &self.comparables,
             &query,
-            LISTING_LIMIT,
+            COMPARABLE_SAMPLE,
             TOP_K,
             session,
         )
