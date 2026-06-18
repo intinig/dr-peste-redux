@@ -14,6 +14,27 @@ struct PasteModal {
     item_text: String,
 }
 
+#[derive(poise::Modal)]
+#[name = "Connect your PoE account"]
+struct ConnectModal {
+    #[name = "POESESSID (from your pathofexile.com cookies)"]
+    #[placeholder = "32-character hex value"]
+    poesessid: String,
+}
+
+impl std::fmt::Debug for ConnectModal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ConnectModal(***)")
+    }
+}
+
+/// A POESESSID is a 32-character hex string. Light pre-check so we don't burn a
+/// trade call on an obvious paste error.
+fn valid_poesessid(s: &str) -> bool {
+    let s = s.trim();
+    s.len() == 32 && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
 /// Paste a copied in-game item to price it.
 #[poise::command(slash_command)]
 pub async fn paste(app_ctx: AppContext<'_>) -> Result<(), Error> {
@@ -69,17 +90,23 @@ async fn price_rare(
     parsed: &itemtext::ParsedItem,
     league: &League,
 ) -> Result<(), Error> {
+    let uid = ctx.author().id.get();
+    if let Some(session) = ctx.data().sessions.session_for(uid) {
+        return run_pricing(ctx, parsed, league, &session).await;
+    }
+    prompt_connect(ctx, parsed, league).await
+}
+
+async fn run_pricing(
+    ctx: &Context<'_>,
+    parsed: &itemtext::ParsedItem,
+    league: &League,
+    session: &crate::trade::session::TradeSession,
+) -> Result<(), Error> {
     use poise::serenity_prelude as serenity;
 
-    let uid = ctx.author().id.get();
-    let Some(session) = ctx.data().sessions.session_for(uid) else {
-        ctx.say("🔑 You need to connect your PoE account first — coming in the next step.")
-            .await?;
-        return Ok(());
-    };
-
     let pricer = ctx.data().pricer.clone();
-    let est = match pricer.price(parsed, &league.name, &session).await {
+    let est = match pricer.price(parsed, &league.name, session).await {
         Ok(e) => e,
         Err(e) => {
             tracing::warn!(error = %e, "trade price failed");
@@ -126,7 +153,7 @@ async fn price_rare(
     match interaction {
         Some(mci) => {
             mci.defer(ctx.serenity_context()).await?;
-            match pricer.breakdown(parsed, &league.name, &session).await {
+            match pricer.breakdown(parsed, &league.name, session).await {
                 Ok(bd) => {
                     mci.create_followup(
                         ctx.serenity_context(),
@@ -168,6 +195,119 @@ async fn price_rare(
     Ok(())
 }
 
+async fn prompt_connect(
+    ctx: &Context<'_>,
+    parsed: &itemtext::ParsedItem,
+    league: &League,
+) -> Result<(), Error> {
+    use poise::serenity_prelude as serenity;
+
+    let uid = ctx.author().id.get();
+    // Stash the parsed item so we can price it after the member connects.
+    ctx.data()
+        .pending
+        .write()
+        .unwrap()
+        .insert(uid, (parsed.clone(), std::time::Instant::now()));
+
+    let button = serenity::CreateButton::new("drp_connect")
+        .label("🔑 Connect your PoE account")
+        .style(serenity::ButtonStyle::Primary);
+    let row = serenity::CreateActionRow::Buttons(vec![button]);
+    let reply = ctx
+        .send(
+            poise::CreateReply::default()
+                .ephemeral(true)
+                .content(
+                    "To price rares I search the trade site as **you**. \
+                     Click below and paste your **POESESSID** (pathofexile.com cookie). \
+                     It's kept in memory only, used solely for your searches, and you can remove it any time with `/logout`. \
+                     Privacy: https://drp.pme.it/privacy",
+                )
+                .components(vec![row]),
+        )
+        .await?;
+
+    let msg = reply.message().await?;
+    let interaction =
+        serenity::ComponentInteractionCollector::new(ctx.serenity_context().shard.clone())
+            .message_id(msg.id)
+            .custom_ids(vec!["drp_connect".to_string()])
+            .filter(move |mci| mci.user.id.get() == uid)
+            .timeout(Duration::from_secs(120))
+            .await;
+
+    let Some(mci) = interaction else {
+        reply
+            .edit(
+                *ctx,
+                poise::CreateReply::default()
+                    .content("Connect timed out — run `/paste` again when ready.")
+                    .components(vec![]),
+            )
+            .await?;
+        return Ok(());
+    };
+
+    // Open the POESESSID modal off the component interaction.
+    let submitted = poise::execute_modal_on_component_interaction::<ConnectModal>(
+        ctx,
+        mci,
+        None,
+        Some(Duration::from_secs(300)),
+    )
+    .await?;
+
+    let Some(modal) = submitted else {
+        return Ok(()); // member dismissed the modal
+    };
+
+    if !valid_poesessid(&modal.poesessid) {
+        ctx.send(poise::CreateReply::default().ephemeral(true).content("That doesn't look like a POESESSID (expected 32 hex chars). Run `/paste` and try again."))
+            .await?;
+        return Ok(());
+    }
+
+    let cookie = secrecy::SecretString::new(modal.poesessid.trim().to_string());
+    if let Err(e) = ctx.data().sessions.store(uid, cookie).await {
+        tracing::warn!(error = %e, "session store/validation failed"); // never logs the cookie
+        ctx.send(poise::CreateReply::default().ephemeral(true).content("Couldn't reach trade with that session — is your POESESSID current? Copy it again and `/paste`."))
+            .await?;
+        return Ok(());
+    }
+
+    // Pull the stashed item and price it now.
+    let pending = ctx.data().pending.write().unwrap().remove(&uid);
+    match (pending, ctx.data().sessions.session_for(uid)) {
+        (Some((parsed_item, _)), Some(session)) => {
+            run_pricing(ctx, &parsed_item, league, &session).await
+        }
+        _ => {
+            ctx.send(
+                poise::CreateReply::default()
+                    .ephemeral(true)
+                    .content("Connected! Run `/paste` again to price your item."),
+            )
+            .await?;
+            Ok(())
+        }
+    }
+}
+
 fn format_not_found(name: &str, league: &League) -> String {
     format!("Couldn't find **{name}** in {} data.", league.name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::valid_poesessid;
+
+    #[test]
+    fn accepts_32_hex_rejects_otherwise() {
+        assert!(valid_poesessid("0123456789abcdef0123456789ABCDEF"));
+        assert!(valid_poesessid("  0123456789abcdef0123456789abcdef  ")); // trimmed
+        assert!(!valid_poesessid(""));
+        assert!(!valid_poesessid("tooshort"));
+        assert!(!valid_poesessid("zzzz567890abcdef0123456789abcdef")); // non-hex
+    }
 }

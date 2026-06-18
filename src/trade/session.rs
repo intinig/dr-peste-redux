@@ -108,14 +108,6 @@ impl MemberSessions {
         Ok(client)
     }
 
-    pub fn has_live_session(&self, user_id: u64) -> bool {
-        self.sessions
-            .read()
-            .unwrap()
-            .get(&user_id)
-            .is_some_and(|s| s.captured_at.elapsed() < self.ttl)
-    }
-
     /// Validate connectivity (proxy reachable + trade responds) through the
     /// member's client with the candidate cookie, then store it. On any failure
     /// nothing is stored and a member-safe error is returned.
@@ -230,10 +222,8 @@ mod tests {
     fn store_present_then_forgotten() {
         let r = registry(Duration::from_secs(3600));
         r.insert_test(7, Instant::now());
-        assert!(r.has_live_session(7));
         assert!(r.session_for(7).is_some());
         r.forget(7);
-        assert!(!r.has_live_session(7));
         assert!(r.session_for(7).is_none());
     }
 
@@ -241,7 +231,6 @@ mod tests {
     fn expired_session_is_not_live() {
         let r = registry(Duration::ZERO); // ttl 0 ⇒ anything is already expired
         r.insert_test(9, Instant::now());
-        assert!(!r.has_live_session(9));
         assert!(r.session_for(9).is_none());
     }
 
