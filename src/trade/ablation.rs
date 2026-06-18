@@ -78,6 +78,9 @@ fn craftability_filter(listings: &[Listing], max_explicit: usize) -> Vec<Listing
         .collect()
 }
 
+/// Price comparables for `query`, filtering to the item's craftability tier when
+/// `max_explicit` is `Some` (falling back to a broad-market estimate if no
+/// comparable bases survive, or to affixes-only when craftability is unknown).
 pub async fn estimate<C: Comparables + ?Sized>(
     c: &C,
     query: &TradeQuery,
@@ -165,6 +168,12 @@ fn estimate_from(listings: &[Listing], basis: EstimateBasis) -> PriceEstimate {
     }
 }
 
+/// Ablate every stat filter (up to `PROBE_CEILING`), rank by measured price delta,
+/// and display the top-`k`; plus one pairwise probe on the top two for synergy.
+/// All probes share `max_explicit`, so deltas compare the same craftability tier.
+///
+/// Query budget per call: 1 baseline + min(n, ceiling) single-drops + 1 pairwise
+/// (deduplicated by the client's 60s query cache).
 pub async fn breakdown<C: Comparables + ?Sized>(
     c: &C,
     query: &TradeQuery,
