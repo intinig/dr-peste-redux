@@ -69,7 +69,7 @@ async fn main() -> Result<()> {
     let store = PriceStore::new();
     let client = NinjaClient::new()?;
     let rates = std::sync::Arc::new(std::sync::RwLock::new(trade::rates::RateTable::default()));
-    let trade_client = TradeClient::new(config.poe_sessid.clone(), rates.clone())?;
+    let trade_client = TradeClient::new(config.poesessid.clone(), rates.clone())?;
     let catalog = match trade::stats::StatCatalog::fetch(&trade_client).await {
         Ok(c) if !c.is_empty() => {
             tracing::info!("loaded trade2 stat catalog");
@@ -90,6 +90,10 @@ async fn main() -> Result<()> {
         catalog,
         ProbeLog::new("probes.jsonl"),
     ));
+    let sessions = std::sync::Arc::new(crate::trade::session::MemberSessions::new(
+        config.proxy.clone(),
+        std::time::Duration::from_secs(config.session_ttl_mins * 60),
+    ));
 
     // Best-effort initial refresh so commands have data quickly.
     if let Err(e) = refresh_once(&client, &store, &rates).await {
@@ -109,6 +113,7 @@ async fn main() -> Result<()> {
                 discord::price::price(),
                 discord::farm::farm(),
                 discord::paste::paste(),
+                discord::logout::logout(),
                 discord::help::help(),
             ],
             ..Default::default()
@@ -123,6 +128,7 @@ async fn main() -> Result<()> {
                     config,
                     pricer,
                     rates,
+                    sessions,
                 })
             })
         })

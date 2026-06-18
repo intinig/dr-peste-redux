@@ -9,12 +9,18 @@ use crate::trade::model::{
     AblationKind, Breakdown, Confidence, Contribution, Currency, Listing, PriceEstimate,
     SynergyNote, TradeQuery,
 };
+use crate::trade::session::TradeSession;
 
 /// High-level seam the pricer depends on. `TradeClient` implements it via
 /// `gather_comparables`; tests fake it directly.
 #[async_trait]
 pub trait Comparables {
-    async fn comparables(&self, query: &TradeQuery, limit: usize) -> Result<Vec<Listing>>;
+    async fn comparables(
+        &self,
+        query: &TradeQuery,
+        limit: usize,
+        session: &TradeSession,
+    ) -> Result<Vec<Listing>>;
 }
 
 /// Hard cap on how many stats a single breakdown will probe, to bound the
@@ -30,13 +36,14 @@ pub async fn gather_comparables<A: TradeApi + ?Sized>(
     query: &TradeQuery,
     limit: usize,
     max_relax: usize,
+    session: &TradeSession,
 ) -> Result<Vec<Listing>> {
     let mut q = query.clone();
     let mut relaxations = 0;
     loop {
-        let resp = api.search(&q).await?;
+        let resp = api.search(&q, session).await?;
         let take = resp.hashes.len().min(limit);
-        let mut listings = api.fetch(&resp.id, &resp.hashes[..take]).await?;
+        let mut listings = api.fetch(&resp.id, &resp.hashes[..take], session).await?;
         listings.sort_by(|a, b| {
             a.price_divine
                 .partial_cmp(&b.price_divine)
@@ -63,8 +70,9 @@ pub async fn estimate<C: Comparables + ?Sized>(
     c: &C,
     query: &TradeQuery,
     limit: usize,
+    session: &TradeSession,
 ) -> Result<PriceEstimate> {
-    let listings = c.comparables(query, limit).await?;
+    let listings = c.comparables(query, limit, session).await?;
     Ok(estimate_from(&listings))
 }
 
@@ -131,8 +139,9 @@ pub async fn breakdown<C: Comparables + ?Sized>(
     query: &TradeQuery,
     limit: usize,
     k: usize,
+    session: &TradeSession,
 ) -> Result<Breakdown> {
-    let baseline = estimate(c, query, limit).await?;
+    let baseline = estimate(c, query, limit, session).await?;
 
     // Probe every stat up to the ceiling so ranking is by measured impact.
     let probe_count = query.stats.len().min(PROBE_CEILING);
@@ -142,7 +151,7 @@ pub async fn breakdown<C: Comparables + ?Sized>(
         let sf = &query.stats[i];
         let mut q = query.clone();
         q.stats.remove(i);
-        let without = estimate(c, &q, limit).await?;
+        let without = estimate(c, &q, limit, session).await?;
         ranked.push(Contribution {
             characteristic: sf.label.clone(),
             kind: AblationKind::Drop,
@@ -170,7 +179,7 @@ pub async fn breakdown<C: Comparables + ?Sized>(
                 let (hi, lo) = if ai > bi { (ai, bi) } else { (bi, ai) };
                 q.stats.remove(hi);
                 q.stats.remove(lo);
-                let without_both = estimate(c, &q, limit).await?;
+                let without_both = estimate(c, &q, limit, session).await?;
                 let drop_both = baseline.typical - without_both.typical;
                 let sum_individual = ranked[0].delta_divine + ranked[1].delta_divine;
                 // Super-additive synergy: A and B are worth more together than apart.
@@ -236,6 +245,7 @@ mod tests {
         AblationKind, Confidence, Currency, Listing, MiscFilters, Money, SearchResponse,
         StatFilter, TradeQuery,
     };
+    use crate::trade::session::TradeSession;
     use async_trait::async_trait;
     use std::sync::Mutex;
 
@@ -258,7 +268,11 @@ mod tests {
 
     #[async_trait]
     impl TradeApi for FakeApi {
-        async fn search(&self, q: &TradeQuery) -> anyhow::Result<SearchResponse> {
+        async fn search(
+            &self,
+            q: &TradeQuery,
+            _session: &TradeSession,
+        ) -> anyhow::Result<SearchResponse> {
             self.seen.lock().unwrap().push(q.clone());
             let n = 1 + (3usize.saturating_sub(q.stats.len() + q.equipment.len())) * 4;
             let hashes = (0..n).map(|i| format!("h{i}")).collect::<Vec<_>>();
@@ -268,7 +282,12 @@ mod tests {
                 hashes,
             })
         }
-        async fn fetch(&self, _id: &str, hashes: &[String]) -> anyhow::Result<Vec<Listing>> {
+        async fn fetch(
+            &self,
+            _id: &str,
+            hashes: &[String],
+            _session: &TradeSession,
+        ) -> anyhow::Result<Vec<Listing>> {
             Ok(hashes
                 .iter()
                 .enumerate()
@@ -301,7 +320,9 @@ mod tests {
             seen: Mutex::new(vec![]),
         };
         // 3 stats → 1 listing (< k=5). Must relax (drop a stat) until ≥ 5.
-        let got = gather_comparables(&api, &q_with(3), 5, 3).await.unwrap();
+        let got = gather_comparables(&api, &q_with(3), 5, 3, &TradeSession::for_test())
+            .await
+            .unwrap();
         assert!(got.len() >= 5);
     }
 
@@ -326,7 +347,9 @@ mod tests {
                 })
                 .collect(),
         };
-        let got = gather_comparables(&api, &q, 5, 3).await.unwrap();
+        let got = gather_comparables(&api, &q, 5, 3, &TradeSession::for_test())
+            .await
+            .unwrap();
         assert!(
             got.len() >= 5,
             "should relax equipment bands to reach the limit"
@@ -339,7 +362,12 @@ mod tests {
 
     #[async_trait]
     impl Comparables for FakePricer {
-        async fn comparables(&self, q: &TradeQuery, _limit: usize) -> anyhow::Result<Vec<Listing>> {
+        async fn comparables(
+            &self,
+            q: &TradeQuery,
+            _limit: usize,
+            _session: &TradeSession,
+        ) -> anyhow::Result<Vec<Listing>> {
             // base 5; +10 if "spell" present; +2 if "crit" present; +6 extra if BOTH (synergy)
             let has_spell = q.stats.iter().any(|s| s.id.contains("spell"));
             let has_crit = q.stats.iter().any(|s| s.id.contains("crit"));
@@ -383,7 +411,14 @@ mod tests {
 
     #[tokio::test]
     async fn estimate_reports_typical_and_confidence() {
-        let est = estimate(&FakePricer, &two_stat_query(), 10).await.unwrap();
+        let est = estimate(
+            &FakePricer,
+            &two_stat_query(),
+            10,
+            &TradeSession::for_test(),
+        )
+        .await
+        .unwrap();
         assert_eq!(est.listing_count, 12);
         assert_eq!(est.confidence, Confidence::High);
         // both stats present → 5+10+2+6 = 23
@@ -402,6 +437,7 @@ mod tests {
             &self,
             _q: &TradeQuery,
             _limit: usize,
+            _session: &TradeSession,
         ) -> anyhow::Result<Vec<Listing>> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             // Return 12 listings at a fixed price so estimates always succeed.
@@ -418,7 +454,9 @@ mod tests {
             calls: calls.clone(),
         };
         // 6 stats, k=4, ceiling=16 → 1 baseline + 6 single-drops + 1 pairwise = 8
-        let bd = breakdown(&fake, &q, 10, 4).await.unwrap();
+        let bd = breakdown(&fake, &q, 10, 4, &TradeSession::for_test())
+            .await
+            .unwrap();
         let n = calls.load(std::sync::atomic::Ordering::SeqCst);
         assert_eq!(n, 8, "expected 8 comparables calls (1+6+1), got {n}");
         assert_eq!(bd.ranked.len(), 4, "display should be truncated to k=4");
@@ -426,9 +464,15 @@ mod tests {
 
     #[tokio::test]
     async fn breakdown_ranks_contributions_and_flags_synergy() {
-        let bd = breakdown(&FakePricer, &two_stat_query(), 10, 2)
-            .await
-            .unwrap();
+        let bd = breakdown(
+            &FakePricer,
+            &two_stat_query(),
+            10,
+            2,
+            &TradeSession::for_test(),
+        )
+        .await
+        .unwrap();
         // baseline 23; drop spell → 5+2 = 7 (delta 16); drop crit → 5+10 = 15 (delta 8)
         assert_eq!(bd.ranked[0].characteristic, "+to all Spell Skills");
         assert_eq!(bd.ranked[0].delta_divine, 16.0);

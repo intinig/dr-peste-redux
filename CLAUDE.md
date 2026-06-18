@@ -83,8 +83,15 @@ Set via environment (or a local `.env`, loaded by `dotenvy`):
 - `GUILD_ID` — guild for instant slash-command registration.
 - `POLL_INTERVAL_MINS` — refresh interval (default 30).
 - `MIN_VOLUME` — liquidity threshold for `/farm`.
-- `POE_SESSID` — optional PoE session cookie to raise trade rate limits.
-  **Secret.** Anonymous reads work without it (tighter limits).
+- `POESESSID` — optional PoE session cookie (operator's own account) to raise
+  trade rate limits. **Secret.** Anonymous reads work without it (tighter limits).
+- `PROXY_GATEWAY` / `PROXY_USER` / `PROXY_PASS` — IPRoyal residential proxy
+  credentials. All three required to enable per-member proxy egress. **Secret.**
+- `PROXY_COUNTRY` — ISO-2 country code for sticky-session routing (default `us`).
+- `PROXY_SESSION_LIFETIME_MINS` — IPRoyal sticky-IP lifetime in minutes (default 30).
+- `SESSION_TTL_MINS` — how long a captured member POESESSID is kept in memory
+  before the bot re-prompts (default 180). Member cookies are never persisted to
+  disk; they live only in the process and are lost on restart.
 
 Keep a committed `.env.example` documenting the keys with placeholder values.
 

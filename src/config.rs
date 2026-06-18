@@ -6,7 +6,9 @@ pub struct Config {
     pub guild_id: u64,
     pub poll_interval_mins: u64,
     pub min_volume: f64,
-    pub poe_sessid: Option<String>,
+    pub poesessid: Option<String>,
+    pub proxy: Option<crate::trade::session::ProxyConfig>,
+    pub session_ttl_mins: u64,
 }
 
 impl Config {
@@ -35,13 +37,47 @@ impl Config {
             Some(v) => v.parse::<f64>().context("MIN_VOLUME must be a number")?,
             None => 0.0,
         };
-        let poe_sessid = get("POE_SESSID").filter(|s| !s.is_empty());
+        let poesessid = get("POESESSID").filter(|s| !s.is_empty());
+
+        let session_ttl_mins = match get("SESSION_TTL_MINS") {
+            Some(v) => v.parse::<u64>().context("SESSION_TTL_MINS must be a u64")?,
+            None => 180,
+        };
+
+        let proxy = match (
+            get("PROXY_GATEWAY").filter(|s| !s.is_empty()),
+            get("PROXY_USER").filter(|s| !s.is_empty()),
+            get("PROXY_PASS").filter(|s| !s.is_empty()),
+        ) {
+            (Some(gateway), Some(user), Some(pass)) => {
+                let country = get("PROXY_COUNTRY")
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| "us".to_string());
+                let lifetime_mins = match get("PROXY_SESSION_LIFETIME_MINS") {
+                    Some(v) => v
+                        .parse::<u64>()
+                        .context("PROXY_SESSION_LIFETIME_MINS must be a u64")?,
+                    None => 30,
+                };
+                Some(crate::trade::session::ProxyConfig {
+                    gateway,
+                    user,
+                    pass,
+                    country,
+                    lifetime_mins,
+                })
+            }
+            _ => None,
+        };
+
         Ok(Self {
             discord_token,
             guild_id,
             poll_interval_mins,
             min_volume,
-            poe_sessid,
+            poesessid,
+            proxy,
+            session_ttl_mins,
         })
     }
 }
@@ -118,17 +154,61 @@ mod tests {
         let cfg = Config::from_lookup(|k| match k {
             "DISCORD_TOKEN" => Some("t".into()),
             "GUILD_ID" => Some("1".into()),
-            "POE_SESSID" => Some("abc".into()),
+            "POESESSID" => Some("abc".into()),
             _ => None,
         })
         .unwrap();
-        assert_eq!(cfg.poe_sessid.as_deref(), Some("abc"));
+        assert_eq!(cfg.poesessid.as_deref(), Some("abc"));
         let cfg2 = Config::from_lookup(|k| match k {
             "DISCORD_TOKEN" => Some("t".into()),
             "GUILD_ID" => Some("1".into()),
             _ => None,
         })
         .unwrap();
-        assert_eq!(cfg2.poe_sessid, None);
+        assert_eq!(cfg2.poesessid, None);
+    }
+
+    #[test]
+    fn parses_proxy_and_ttl_when_all_present() {
+        let cfg = Config::from_lookup(|k| match k {
+            "DISCORD_TOKEN" => Some("t".into()),
+            "GUILD_ID" => Some("1".into()),
+            "PROXY_GATEWAY" => Some("geo.iproyal.com:12321".into()),
+            "PROXY_USER" => Some("u".into()),
+            "PROXY_PASS" => Some("p".into()),
+            "PROXY_COUNTRY" => Some("de".into()),
+            "SESSION_TTL_MINS" => Some("60".into()),
+            _ => None,
+        })
+        .unwrap();
+        let proxy = cfg.proxy.expect("proxy configured");
+        assert_eq!(proxy.gateway, "geo.iproyal.com:12321");
+        assert_eq!(proxy.country, "de");
+        assert_eq!(cfg.session_ttl_mins, 60);
+    }
+
+    #[test]
+    fn proxy_is_none_when_incomplete() {
+        let cfg = Config::from_lookup(|k| match k {
+            "DISCORD_TOKEN" => Some("t".into()),
+            "GUILD_ID" => Some("1".into()),
+            "PROXY_GATEWAY" => Some("geo.iproyal.com:12321".into()),
+            // missing PROXY_USER / PROXY_PASS
+            _ => None,
+        })
+        .unwrap();
+        assert!(cfg.proxy.is_none());
+    }
+
+    #[test]
+    fn reads_poesessid_env() {
+        let cfg = Config::from_lookup(|k| match k {
+            "DISCORD_TOKEN" => Some("t".into()),
+            "GUILD_ID" => Some("1".into()),
+            "POESESSID" => Some("abc".into()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(cfg.poesessid.as_deref(), Some("abc"));
     }
 }

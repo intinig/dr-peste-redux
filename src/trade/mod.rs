@@ -7,6 +7,7 @@ pub mod model;
 pub mod pseudo;
 pub mod query;
 pub mod rates;
+pub mod session;
 pub mod stats;
 
 use anyhow::Result;
@@ -17,6 +18,7 @@ use crate::trade::ablation::{estimate, Comparables};
 use crate::trade::model::{Breakdown, PriceEstimate, Probe};
 use crate::trade::pseudo::PseudoMap;
 use crate::trade::query::build_baseline;
+use crate::trade::session::TradeSession;
 use crate::trade::stats::StatCatalog;
 
 /// Number of cheapest listings to consider per query.
@@ -41,17 +43,33 @@ impl<C: Comparables> TradePricer<C> {
         }
     }
 
-    pub async fn price(&self, item: &ParsedItem, league: &str) -> Result<PriceEstimate> {
+    pub async fn price(
+        &self,
+        item: &ParsedItem,
+        league: &str,
+        session: &TradeSession,
+    ) -> Result<PriceEstimate> {
         let query = build_baseline(item, &self.pseudo, &self.catalog, league);
-        let est = estimate(&self.comparables, &query, LISTING_LIMIT).await?;
+        let est = estimate(&self.comparables, &query, LISTING_LIMIT, session).await?;
         self.record(&query, &est);
         Ok(est)
     }
 
-    pub async fn breakdown(&self, item: &ParsedItem, league: &str) -> Result<Breakdown> {
+    pub async fn breakdown(
+        &self,
+        item: &ParsedItem,
+        league: &str,
+        session: &TradeSession,
+    ) -> Result<Breakdown> {
         let query = build_baseline(item, &self.pseudo, &self.catalog, league);
-        let bd = crate::trade::ablation::breakdown(&self.comparables, &query, LISTING_LIMIT, TOP_K)
-            .await?;
+        let bd = crate::trade::ablation::breakdown(
+            &self.comparables,
+            &query,
+            LISTING_LIMIT,
+            TOP_K,
+            session,
+        )
+        .await?;
         self.record(&query, &bd.baseline);
         Ok(bd)
     }
@@ -79,12 +97,18 @@ mod tests {
     use crate::itemtext::{ItemStat, ParsedItem, Rarity};
     use crate::trade::ablation::Comparables;
     use crate::trade::model::{Currency, Listing, Money, TradeQuery};
+    use crate::trade::session::TradeSession;
     use async_trait::async_trait;
 
     struct Flat(f64);
     #[async_trait]
     impl Comparables for Flat {
-        async fn comparables(&self, _q: &TradeQuery, _l: usize) -> anyhow::Result<Vec<Listing>> {
+        async fn comparables(
+            &self,
+            _q: &TradeQuery,
+            _l: usize,
+            _session: &TradeSession,
+        ) -> anyhow::Result<Vec<Listing>> {
             Ok(vec![
                 Listing {
                     price: Money {
@@ -130,7 +154,10 @@ mod tests {
             crate::trade::stats::StatCatalog::default(),
             log,
         );
-        let est = pricer.price(&ring(), "Standard").await.unwrap();
+        let est = pricer
+            .price(&ring(), "Standard", &TradeSession::for_test())
+            .await
+            .unwrap();
         assert_eq!(est.typical, 12.0);
         let contents = std::fs::read_to_string(dir.path().join("p.jsonl")).unwrap();
         assert_eq!(contents.lines().count(), 1);
