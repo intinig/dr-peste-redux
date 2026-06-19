@@ -95,6 +95,29 @@ marginal contribution:
    the prediction extrapolates well past observed combos. The embed labels it
    "estimated from marginal mod values (base + N mods modelled)".
 
+### Latency estimate (don't surprise the user)
+
+The fast path is ~1 search; the value path is `N+1` paced searches + fetches and
+can run for tens of seconds. So the user is told *before* the wait, and only when
+the value path actually triggers:
+
+- `/paste` defers immediately ("Pricing…"). The exact query (1 search) runs first.
+- **Fast path:** result replaces "Pricing…" — no extra message.
+- **Value path:** before issuing the sub-queries, the pricer reports
+  `(sub_query_count, estimated_duration)` to the caller through an async progress
+  hook; the discord handler edits the deferred message to
+  *"Heavily-modded item — modelling value from K market samples (~Ts)…"*, then
+  replaces it with the estimate when done.
+- **The estimate** comes from the throttle, which knows the live rate: a new
+  `RateLimiter::estimate(ep, n) -> Duration` returns the expected wall-clock for
+  `n` more requests on `ep` given the current window + learned rules. The pricer
+  sums the search and fetch estimates for the `N+1` sub-queries, rounds up, and
+  reports it. It is a *ballpark* shown so the wait isn't surprising, not a promise.
+
+The progress hook is a small async trait (`PriceProgress`) with a no-op
+implementation used by tests and any non-interactive caller, so the pricing core
+stays decoupled from discord.
+
 ### Robustness & fallbacks
 
 - **Identifiability guards before fitting:** drop any feature with no variance in
@@ -123,8 +146,11 @@ rebuilding the breakdown on them is a tracked follow-up, not part of this fix.
 | `src/trade/client.rs` | `parse_fetch` extracts the listing id and the explicit stat-id set (from `extended.hashes.explicit`, falling back to `explicitMods[].hash`, normalising off the `stat.` prefix). |
 | `src/trade/query.rs` | `build_baseline` stops emitting filters for runes/implicits/enchants (affix explicits only). A helper to derive the base-only and base+single-mod sub-queries. |
 | `src/trade/hedonic.rs` (**new**) | Pure model: feature matrix → trimmed OLS (`fit`) → `predict`; plus the marginal-contribution estimator orchestrating sampling via `Comparables`. All numeric core pure + unit-tested. |
-| `src/trade/ablation.rs` / `mod.rs` | `estimate`/`price` route to the value path when the exact query is thin; fast path otherwise. |
+| `src/trade/ablation.rs` / `mod.rs` | `estimate`/`price` route to the value path when the exact query is thin; fast path otherwise. `price` gains a `&dyn PriceProgress` arg and reports `(count, est)` before the value-path sub-queries. |
 | `src/trade/model.rs` (`EstimateBasis`) | add a `Marginal` basis variant for labelling/confidence. |
+| `src/trade/limiter.rs` | `RateLimiter::estimate(ep, n) -> Duration` — expected wall-clock for `n` more requests given the current window + learned rules (pure helper, unit-tested). |
+| `src/trade/mod.rs` (or `trade/progress.rs`) | `PriceProgress` async trait (`value_path(count, est)`) + a no-op impl for tests/non-interactive callers. |
+| `src/discord/paste.rs` | implement `PriceProgress` to edit the deferred response ("modelling value from K samples (~Ts)…"); pass it into `price`. |
 
 ## Data flow
 
@@ -134,6 +160,7 @@ price(item)
   exact = comparables(query)             # fast path
   if exact.len() >= MIN: percentile-price(craft_filter(exact))   # unchanged
   else:                                  # value path
+    progress.value_path(N+1, limiter.estimate(...))   # show ETA before the wait
     base   = comparables(base_query)
     perMod = [comparables(base + mod_i) for mod_i in query.stats]
     pool   = dedup_by_id(base ++ perMod) |> craft_filter
@@ -157,10 +184,15 @@ Offline (pure, no network):
   base-tier fallback with `Low` confidence.
 - **Routing:** exact query ≥ MIN → fast path (no extra searches, asserted via a
   fake `Comparables` call counter); < MIN → value path issues `N+1` sub-queries.
+- **Latency estimate:** `RateLimiter::estimate(ep, n)` grows with `n` and the
+  rules (e.g. n under one window → ~0; n beyond it → ≈ extra windows); the value
+  path fires `PriceProgress::value_path` exactly once with `count == N+1`, and the
+  fast path never fires it (asserted via a recording no-op progress).
 
 Live acceptance (manual, via `/paste`): the Chiming Staff returns a non-zero
-estimate with a sensible interval and a "modelled" label; a common rare (boot)
-still prices via the fast path and is unchanged.
+estimate with a sensible interval and a "modelled" label, and shows the
+"modelling … (~Ts)" notice during the wait; a common rare (boot) still prices via
+the fast path with no notice and is unchanged.
 
 ## Non-goals (YAGNI)
 
