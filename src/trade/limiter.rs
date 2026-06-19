@@ -127,17 +127,26 @@ impl RateLimiter {
         if !rules.is_empty() {
             b.rules = rules;
         }
-        if !states.is_empty() {
+        // Reconcile only the tightest (smallest-period) window against the
+        // server's reported usage, taking the max current across the Account and
+        // IP scopes for that period. Seeding every triple would double-count
+        // shared-period Account+IP state and let a long window's count pollute
+        // tighter windows; the reactive 429 backoff covers any longer window.
+        if let Some(min_period) = states.iter().map(|(_, p)| *p).filter(|p| *p > 0).min() {
+            let current = states
+                .iter()
+                .filter(|(_, p)| *p == min_period)
+                .map(|(c, _)| *c)
+                .max()
+                .unwrap_or(0);
             let now = Instant::now();
-            for (current, period) in states {
-                let local = b
-                    .sends
-                    .iter()
-                    .filter(|t| now.duration_since(**t).as_secs_f64() < period as f64)
-                    .count() as u32;
-                for _ in local..current {
-                    b.sends.push_back(now);
-                }
+            let local = b
+                .sends
+                .iter()
+                .filter(|t| now.duration_since(**t).as_secs_f64() < min_period as f64)
+                .count() as u32;
+            for _ in local..current {
+                b.sends.push_back(now);
             }
         }
     }
@@ -306,5 +315,34 @@ mod tests {
         lim.observe(Endpoint::Search, &h).await;
         assert_eq!(lim.search.lock().await.sends.len(), 3);
         assert_eq!(lim.fetch.lock().await.sends.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn observe_does_not_double_count_account_and_ip_state() {
+        let lim = RateLimiter::new();
+        let mut h = HeaderMap::new();
+        h.insert("X-Rate-Limit-Account", HeaderValue::from_static("8:10:60"));
+        h.insert(
+            "X-Rate-Limit-Account-State",
+            HeaderValue::from_static("4:10:0"),
+        );
+        h.insert("X-Rate-Limit-Ip-State", HeaderValue::from_static("3:10:0"));
+        lim.observe(Endpoint::Search, &h).await;
+        // The shared 10s window seeds max(4, 3) = 4 — NOT 4 + 3 = 7.
+        assert_eq!(lim.search.lock().await.sends.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn observe_reconciles_only_tightest_window() {
+        let lim = RateLimiter::new();
+        let mut h = HeaderMap::new();
+        h.insert(
+            "X-Rate-Limit-Account-State",
+            HeaderValue::from_static("5:10:0,30:300:0"),
+        );
+        lim.observe(Endpoint::Fetch, &h).await;
+        // Only the tightest (10s) window is reconciled (5); the 300s window's 30
+        // does not pollute it.
+        assert_eq!(lim.fetch.lock().await.sends.len(), 5);
     }
 }

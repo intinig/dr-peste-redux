@@ -114,15 +114,24 @@ impl MemberSessions {
         Ok(client)
     }
 
-    /// A member's rate limiter (built once, cached). Independent per member so
-    /// each paces against their own account+IP budget.
+    /// A member's rate limiter (built once, cached). Keyed by *egress identity*:
+    /// with a proxy each member gets a distinct sticky IP, so each gets its own
+    /// limiter (independent account + IP budget). Without a proxy every member
+    /// egresses from the bot's single IP and shares one IP budget, so they share
+    /// one limiter. Resolved under the write lock via `entry` so concurrent
+    /// first-callers for the same key share one limiter instead of each creating
+    /// a separate `Arc` and splitting the budget.
     fn limiter_for(&self, user_id: u64) -> Arc<RateLimiter> {
-        if let Some(l) = self.limiters.read().unwrap().get(&user_id) {
+        let key = if self.proxy.is_some() { user_id } else { 0 };
+        if let Some(l) = self.limiters.read().unwrap().get(&key) {
             return l.clone();
         }
-        let l = Arc::new(RateLimiter::new());
-        self.limiters.write().unwrap().insert(user_id, l.clone());
-        l
+        self.limiters
+            .write()
+            .unwrap()
+            .entry(key)
+            .or_insert_with(|| Arc::new(RateLimiter::new()))
+            .clone()
     }
 
     /// Validate connectivity (the trade site responds through the member's
@@ -297,5 +306,24 @@ mod tests {
     fn builds_a_proxied_client_without_panicking() {
         let r = MemberSessions::new(Some(cfg()), Duration::from_secs(60));
         assert!(r.build_client(42).is_ok());
+    }
+
+    #[test]
+    fn limiter_shared_across_members_without_proxy() {
+        let r = MemberSessions::new(None, Duration::from_secs(60));
+        let a = r.limiter_for(1);
+        let b = r.limiter_for(2);
+        // No proxy ⇒ one egress IP ⇒ one shared limiter (shared IP budget).
+        assert!(Arc::ptr_eq(&a, &b));
+    }
+
+    #[test]
+    fn limiter_per_member_with_proxy() {
+        let r = MemberSessions::new(Some(cfg()), Duration::from_secs(60));
+        let a = r.limiter_for(1);
+        let b = r.limiter_for(2);
+        // Distinct sticky IPs ⇒ distinct limiters; cached/stable per member.
+        assert!(!Arc::ptr_eq(&a, &b));
+        assert!(Arc::ptr_eq(&a, &r.limiter_for(1)));
     }
 }
