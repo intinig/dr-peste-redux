@@ -138,6 +138,10 @@ fn tier_note(parsed: &ParsedItem, est: &PriceEstimate) -> String {
             "affixes present; craftability not detected — paste in Advanced Mode for a sharper estimate"
                 .to_string()
         }
+        Marginal => format!(
+            "estimated from marginal mod values · modelled from {} partial-match listings",
+            est.listing_count
+        ),
     }
 }
 

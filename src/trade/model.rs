@@ -46,6 +46,11 @@ pub struct Listing {
     /// Count of explicit (prefix/suffix) mods on the listed item; the
     /// craftability-tier key. `0` when the fetch response omits mods.
     pub explicit_count: usize,
+    /// Trade listing id (dedup key when pooling several searches).
+    pub id: String,
+    /// Normalised explicit stat ids on the item (e.g. `explicit.stat_123`),
+    /// for matching against our query's `StatFilter.id`.
+    pub explicit_stat_ids: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Default, Serialize)]
@@ -107,6 +112,9 @@ pub enum EstimateBasis {
     BroadMarket,
     /// Craftability unknown (basic clipboard) → unfiltered, affixes-only.
     AffixesOnly,
+    /// Exact comparables too thin → value derived from a marginal-contribution
+    /// (hedonic) model over partial-overlap comparables.
+    Marginal,
 }
 
 impl Confidence {
@@ -186,6 +194,8 @@ mod tests {
             },
             price_divine: 0.5,
             explicit_count: 0,
+            id: String::new(),
+            explicit_stat_ids: vec![],
         };
         assert_eq!(l.price_divine, 0.5);
         assert!(matches!(l.price.currency, Currency::Exalted));
