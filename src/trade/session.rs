@@ -8,6 +8,7 @@ use reqwest::header::{self, HeaderValue};
 use secrecy::{ExposeSecret, SecretString};
 
 use crate::trade::client::{TRADE_BASE, USER_AGENT};
+use crate::trade::limiter::RateLimiter;
 
 /// Operator-configured IPRoyal residential proxy.
 /// No `Debug` derive: `pass` is an operator secret.
@@ -53,6 +54,7 @@ pub fn sticky_proxy_url(cfg: &ProxyConfig, user_id: u64) -> String {
 pub struct TradeSession {
     pub client: Arc<reqwest::Client>,
     pub cookie: Arc<SecretString>,
+    pub limiter: Arc<RateLimiter>,
 }
 
 impl TradeSession {
@@ -62,6 +64,7 @@ impl TradeSession {
         TradeSession {
             client: Arc::new(reqwest::Client::new()),
             cookie: Arc::new(SecretString::new("test-cookie".to_string())),
+            limiter: Arc::new(RateLimiter::permissive()),
         }
     }
 }
@@ -76,6 +79,7 @@ struct MemberSession {
 pub struct MemberSessions {
     sessions: RwLock<HashMap<u64, MemberSession>>,
     clients: RwLock<HashMap<u64, Arc<reqwest::Client>>>,
+    limiters: RwLock<HashMap<u64, Arc<RateLimiter>>>,
     proxy: Option<ProxyConfig>,
     ttl: Duration,
 }
@@ -85,6 +89,7 @@ impl MemberSessions {
         MemberSessions {
             sessions: RwLock::new(HashMap::new()),
             clients: RwLock::new(HashMap::new()),
+            limiters: RwLock::new(HashMap::new()),
             proxy,
             ttl,
         }
@@ -107,6 +112,26 @@ impl MemberSessions {
             .unwrap()
             .insert(user_id, client.clone());
         Ok(client)
+    }
+
+    /// A member's rate limiter (built once, cached). Keyed by *egress identity*:
+    /// with a proxy each member gets a distinct sticky IP, so each gets its own
+    /// limiter (independent account + IP budget). Without a proxy every member
+    /// egresses from the bot's single IP and shares one IP budget, so they share
+    /// one limiter. Resolved under the write lock via `entry` so concurrent
+    /// first-callers for the same key share one limiter instead of each creating
+    /// a separate `Arc` and splitting the budget.
+    fn limiter_for(&self, user_id: u64) -> Arc<RateLimiter> {
+        let key = if self.proxy.is_some() { user_id } else { 0 };
+        if let Some(l) = self.limiters.read().unwrap().get(&key) {
+            return l.clone();
+        }
+        self.limiters
+            .write()
+            .unwrap()
+            .entry(key)
+            .or_insert_with(|| Arc::new(RateLimiter::new()))
+            .clone()
     }
 
     /// Validate connectivity (the trade site responds through the member's
@@ -158,7 +183,12 @@ impl MemberSessions {
         match found {
             Found::Live(cookie) => {
                 let client = self.build_client(user_id).ok()?;
-                Some(TradeSession { client, cookie })
+                let limiter = self.limiter_for(user_id);
+                Some(TradeSession {
+                    client,
+                    cookie,
+                    limiter,
+                })
             }
             // Evict on TTL: drop the session + cached client so the cookie does
             // not linger in memory past the advertised expiry window.
@@ -173,6 +203,7 @@ impl MemberSessions {
     pub fn forget(&self, user_id: u64) {
         self.sessions.write().unwrap().remove(&user_id);
         self.clients.write().unwrap().remove(&user_id);
+        self.limiters.write().unwrap().remove(&user_id);
     }
 }
 
@@ -275,5 +306,24 @@ mod tests {
     fn builds_a_proxied_client_without_panicking() {
         let r = MemberSessions::new(Some(cfg()), Duration::from_secs(60));
         assert!(r.build_client(42).is_ok());
+    }
+
+    #[test]
+    fn limiter_shared_across_members_without_proxy() {
+        let r = MemberSessions::new(None, Duration::from_secs(60));
+        let a = r.limiter_for(1);
+        let b = r.limiter_for(2);
+        // No proxy ⇒ one egress IP ⇒ one shared limiter (shared IP budget).
+        assert!(Arc::ptr_eq(&a, &b));
+    }
+
+    #[test]
+    fn limiter_per_member_with_proxy() {
+        let r = MemberSessions::new(Some(cfg()), Duration::from_secs(60));
+        let a = r.limiter_for(1);
+        let b = r.limiter_for(2);
+        // Distinct sticky IPs ⇒ distinct limiters; cached/stable per member.
+        assert!(!Arc::ptr_eq(&a, &b));
+        assert!(Arc::ptr_eq(&a, &r.limiter_for(1)));
     }
 }

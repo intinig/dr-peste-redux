@@ -9,6 +9,7 @@ use serde_json::Value;
 
 use std::sync::{Arc, RwLock};
 
+use crate::trade::limiter::{Endpoint, RateLimiter};
 use crate::trade::model::{Currency, Listing, Money, SearchResponse, TradeQuery};
 use crate::trade::query::to_payload;
 use crate::trade::rates::RateTable;
@@ -117,6 +118,7 @@ pub trait TradeApi {
 pub struct TradeClient {
     http: Client,
     rates: Arc<RwLock<RateTable>>,
+    default_limiter: Arc<RateLimiter>,
     /// Short-lived cache keyed by `"<limit>|<query_json>"`.
     /// Entries expire after 60 seconds so repeated calls (e.g. the baseline
     /// probe shared between `price` and `breakdown`) hit trade2 only once,
@@ -141,6 +143,7 @@ impl TradeClient {
         Ok(Self {
             http: builder.build()?,
             rates,
+            default_limiter: Arc::new(RateLimiter::new()),
             cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         })
     }
@@ -187,15 +190,23 @@ impl TradeClient {
             .unwrap_or_default()
     }
 
-    /// Sends a request, retrying up to twice on HTTP 429 after sleeping for the
-    /// server-advised period. Other errors propagate immediately.
-    async fn send_with_retry<F>(&self, build: F) -> Result<reqwest::Response>
+    /// Sends a request, pacing it through `limiter` first (proactive throttle)
+    /// and retrying up to twice on HTTP 429 after sleeping for the server-advised
+    /// period (reactive safety net). Other errors propagate immediately.
+    async fn send_with_retry<F>(
+        &self,
+        limiter: &RateLimiter,
+        ep: Endpoint,
+        build: F,
+    ) -> Result<reqwest::Response>
     where
         F: Fn() -> reqwest::RequestBuilder,
     {
         let mut attempt = 0u32;
         loop {
+            limiter.acquire(ep).await;
             let resp = build().send().await?;
+            limiter.observe(ep, resp.headers()).await;
             if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS && attempt < 2 {
                 let wait = retry_after_secs(resp.headers());
                 tracing::warn!(wait_secs = wait, "trade2 rate-limited; backing off");
@@ -211,7 +222,9 @@ impl TradeClient {
     pub async fn fetch_stats_raw(&self) -> Result<String> {
         let url = format!("{TRADE_BASE}/data/stats");
         Ok(self
-            .send_with_retry(|| self.http.get(&url))
+            .send_with_retry(&self.default_limiter, Endpoint::Fetch, || {
+                self.http.get(&url)
+            })
             .await
             .context("trade2 data/stats failed")?
             .text()
@@ -225,7 +238,7 @@ impl TradeApi for TradeClient {
         let url = format!("{TRADE_BASE}/search/{}", query.league);
         let payload = to_payload(query);
         let resp = self
-            .send_with_retry(|| {
+            .send_with_retry(&session.limiter, Endpoint::Search, || {
                 with_cookie(session.client.post(&url).json(&payload), &session.cookie)
             })
             .await
@@ -261,7 +274,9 @@ impl TradeApi for TradeClient {
         let csv = hashes.join(",");
         let url = format!("{TRADE_BASE}/fetch/{csv}?query={query_id}");
         let v: Value = self
-            .send_with_retry(|| with_cookie(session.client.get(&url), &session.cookie))
+            .send_with_retry(&session.limiter, Endpoint::Fetch, || {
+                with_cookie(session.client.get(&url), &session.cookie)
+            })
             .await
             .context("trade2 fetch failed")?
             .json()
