@@ -58,29 +58,35 @@ impl<C: Comparables> TradePricer<C> {
         progress: &dyn crate::trade::ablation::PriceProgress,
     ) -> Result<PriceEstimate> {
         let query = build_baseline(item, &self.pseudo, &self.catalog, league);
-        let max_explicit = item.craftability().map(|c| c.explicit_count as usize);
+        // `craft` is `Some(n)` for clipboard items with affix tags, `None` for
+        // basic clipboard items where the affix type is unknown.
+        let craft = item.craftability().map(|c| c.explicit_count as usize);
         let exact = estimate(
             &self.comparables,
             &query,
             COMPARABLE_SAMPLE,
+            0,
             session,
-            max_explicit,
+            craft,
         )
         .await?;
-        // Fast path: enough exact comparables, or craftability unknown (can't model).
-        let est = match max_explicit {
-            Some(max) if exact.listing_count < MIN_COMPARABLES => {
-                crate::trade::ablation::marginal_estimate(
-                    &self.comparables,
-                    &query,
-                    COMPARABLE_SAMPLE,
-                    session,
-                    max,
-                    progress,
-                )
-                .await?
-            }
-            _ => exact,
+        // Value path: enter whenever the exact result is too thin (< MIN_COMPARABLES),
+        // regardless of whether craftability is known. Basic-clipboard items
+        // (craft=None) use their raw explicit count as the value-path cap so the
+        // hedonic model sees a reasonable craftability window.
+        let est = if exact.listing_count < MIN_COMPARABLES {
+            let max_for_value = craft.unwrap_or(item.explicits.len());
+            crate::trade::ablation::marginal_estimate(
+                &self.comparables,
+                &query,
+                COMPARABLE_SAMPLE,
+                session,
+                max_for_value,
+                progress,
+            )
+            .await?
+        } else {
+            exact
         };
         self.record(&query, &est);
         Ok(est)
@@ -140,6 +146,7 @@ mod tests {
             &self,
             _q: &TradeQuery,
             _l: usize,
+            _max_relax: usize,
             _session: &TradeSession,
         ) -> anyhow::Result<Vec<Listing>> {
             Ok(vec![
@@ -264,6 +271,7 @@ mod tests {
             &self,
             q: &TradeQuery,
             _l: usize,
+            _max_relax: usize,
             _session: &TradeSession,
         ) -> anyhow::Result<Vec<Listing>> {
             if q.stats.len() == self.full_stat_count {
@@ -297,6 +305,7 @@ mod tests {
             &self,
             _q: &TradeQuery,
             _l: usize,
+            _max_relax: usize,
             _session: &TradeSession,
         ) -> anyhow::Result<Vec<Listing>> {
             // 15 listings > MIN_COMPARABLES=10, ec=1 <= max=2.
@@ -375,6 +384,7 @@ mod tests {
                 &self,
                 q: &TradeQuery,
                 _l: usize,
+                _max_relax: usize,
                 _s: &TradeSession,
             ) -> anyhow::Result<Vec<Listing>> {
                 let prefix = format!("t{}", q.stats.len());
@@ -404,6 +414,57 @@ mod tests {
         assert!(
             est3.listing_count > 3,
             "value path pooled more than fast-path 3"
+        );
+    }
+
+    /// Basic-clipboard item (all explicits have `affix: None` → `craftability()` is
+    /// `None`) with a thin exact result enters the value path and produces a
+    /// non-empty estimate whose basis is NOT the fast-path CraftTier/AffixesOnly.
+    #[tokio::test]
+    async fn basic_clipboard_thin_exact_enters_value_path() {
+        // ring() has one explicit with affix=None → craftability() is None.
+        let item = ring();
+        // ThinFake returns 3 listings (< MIN_COMPARABLES=10) for every sub-query.
+        // value path is entered; marginal_estimate pools > 3 across sub-queries.
+        struct ThinFakeBasic;
+        #[async_trait]
+        impl Comparables for ThinFakeBasic {
+            async fn comparables(
+                &self,
+                q: &TradeQuery,
+                _l: usize,
+                _max_relax: usize,
+                _s: &TradeSession,
+            ) -> anyhow::Result<Vec<Listing>> {
+                let prefix = format!("tb{}", q.stats.len());
+                Ok((0..3usize)
+                    .map(|i| make_listing(5.0 + i as f64 * 0.1, 1, &format!("{prefix}-{i}")))
+                    .collect())
+            }
+        }
+        let pricer = make_pricer(ThinFakeBasic);
+        let est = pricer
+            .price(
+                &item,
+                "Standard",
+                &TradeSession::for_test(),
+                &crate::trade::ablation::NoProgress,
+            )
+            .await
+            .unwrap();
+        // Value path entered: basis must not be AffixesOnly (old fast-path for craft=None)
+        // and must not be CraftTier. It will be BroadMarket or Marginal depending on
+        // whether the hedonic model can fit with the pooled thin data.
+        assert_ne!(
+            est.basis,
+            crate::trade::model::EstimateBasis::AffixesOnly,
+            "basic-clipboard thin item should enter value path, not fast-path AffixesOnly"
+        );
+        // listing_count must be > 3 (fast-path would report 3; value path pools more).
+        assert!(
+            est.listing_count > 3,
+            "value path pools more than fast-path 3; got {}",
+            est.listing_count
         );
     }
 

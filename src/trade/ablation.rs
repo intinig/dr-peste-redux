@@ -16,13 +16,17 @@ use crate::trade::query::base_query;
 use crate::trade::session::TradeSession;
 
 /// High-level seam the pricer depends on. `TradeClient` implements it via
-/// `gather_comparables`; tests fake it directly.
+/// `gather_comparables`; tests fake it directly. `max_relax` lets callers
+/// control whether query relaxation is used: pass 0 for exact sampling (routing
+/// probe, value-path sub-queries) or a positive value when broadening is wanted
+/// (e.g. breakdown baseline/per-drop probes).
 #[async_trait]
 pub trait Comparables {
     async fn comparables(
         &self,
         query: &TradeQuery,
         limit: usize,
+        max_relax: usize,
         session: &TradeSession,
     ) -> Result<Vec<Listing>>;
 }
@@ -34,7 +38,9 @@ pub trait PriceProgress: Send + Sync {
 }
 
 /// No-op progress for tests and non-interactive callers.
+#[cfg(test)]
 pub struct NoProgress;
+#[cfg(test)]
 #[async_trait]
 impl PriceProgress for NoProgress {
     async fn value_path(&self, _sub_queries: usize, _eta: Duration) {}
@@ -43,6 +49,10 @@ impl PriceProgress for NoProgress {
 /// Derive an estimate when the exact query is too thin: sample base + each mod,
 /// fit a marginal-contribution model, predict the full item. Falls back to a
 /// broad base-tier percentile when the model can't fit. Never errors on thin data.
+///
+/// Uses `max_relax = 0` for all sub-queries: the base and single-mod probes must
+/// reflect exact query results so the hedonic model measures true per-mod marginal
+/// contributions without relaxation noise.
 pub async fn marginal_estimate<C: Comparables + ?Sized>(
     c: &C,
     query: &TradeQuery,
@@ -51,17 +61,17 @@ pub async fn marginal_estimate<C: Comparables + ?Sized>(
     max_explicit: usize,
     progress: &dyn PriceProgress,
 ) -> Result<PriceEstimate> {
-    let n = query.stats.len();
+    let n = query.stats.len().min(PROBE_CEILING);
     let eta = session.limiter.estimate(Endpoint::Search, n + 1)
         + session.limiter.estimate(Endpoint::Fetch, n + 1);
     progress.value_path(n + 1, eta).await;
 
     let base = base_query(query);
-    let mut pool = c.comparables(&base, limit, session).await?;
-    for s in &query.stats {
+    let mut pool = c.comparables(&base, limit, 0, session).await?;
+    for s in query.stats.iter().take(PROBE_CEILING) {
         let mut q = base.clone();
         q.stats = vec![s.clone()];
-        pool.extend(c.comparables(&q, limit, session).await?);
+        pool.extend(c.comparables(&q, limit, 0, session).await?);
     }
     // Dedup by listing id (a rare returned by several sub-queries counts once).
     pool.sort_by(|a, b| a.id.cmp(&b.id));
@@ -69,7 +79,12 @@ pub async fn marginal_estimate<C: Comparables + ?Sized>(
 
     let deduped = pool;
     let filtered = craftability_filter(&deduped, max_explicit);
-    let our_ids: Vec<String> = query.stats.iter().map(|s| s.id.clone()).collect();
+    let our_ids: Vec<String> = query
+        .stats
+        .iter()
+        .take(PROBE_CEILING)
+        .map(|s| s.id.clone())
+        .collect();
 
     match crate::trade::hedonic::model_price(&filtered, &our_ids) {
         Some(p) => {
@@ -168,14 +183,16 @@ fn craftability_filter(listings: &[Listing], max_explicit: usize) -> Vec<Listing
 /// Price comparables for `query`, filtering to the item's craftability tier when
 /// `max_explicit` is `Some` (falling back to a broad-market estimate if no
 /// comparable bases survive, or to affixes-only when craftability is unknown).
+/// `max_relax` is forwarded to `c.comparables` unchanged.
 pub async fn estimate<C: Comparables + ?Sized>(
     c: &C,
     query: &TradeQuery,
     limit: usize,
+    max_relax: usize,
     session: &TradeSession,
     max_explicit: Option<usize>,
 ) -> Result<PriceEstimate> {
-    let listings = c.comparables(query, limit, session).await?;
+    let listings = c.comparables(query, limit, max_relax, session).await?;
     let est = match max_explicit {
         None => estimate_from(&listings, EstimateBasis::AffixesOnly),
         Some(max) => {
@@ -270,6 +287,9 @@ fn estimate_from(listings: &[Listing], basis: EstimateBasis) -> PriceEstimate {
 ///
 /// Query budget per call: 1 baseline + min(n, ceiling) single-drops + 1 pairwise
 /// (deduplicated by the client's 60s query cache).
+///
+/// `max_relax = 3` is used for all estimate sub-calls so the breakdown probes can
+/// find enough comparables for delta measurement even when the item is rare.
 pub async fn breakdown<C: Comparables + ?Sized>(
     c: &C,
     query: &TradeQuery,
@@ -278,7 +298,7 @@ pub async fn breakdown<C: Comparables + ?Sized>(
     session: &TradeSession,
     max_explicit: Option<usize>,
 ) -> Result<Breakdown> {
-    let baseline = estimate(c, query, limit, session, max_explicit).await?;
+    let baseline = estimate(c, query, limit, 3, session, max_explicit).await?;
 
     // Probe every stat up to the ceiling so ranking is by measured impact.
     let probe_count = query.stats.len().min(PROBE_CEILING);
@@ -288,7 +308,7 @@ pub async fn breakdown<C: Comparables + ?Sized>(
         let sf = &query.stats[i];
         let mut q = query.clone();
         q.stats.remove(i);
-        let without = estimate(c, &q, limit, session, max_explicit).await?;
+        let without = estimate(c, &q, limit, 3, session, max_explicit).await?;
         ranked.push(Contribution {
             characteristic: sf.label.clone(),
             kind: AblationKind::Drop,
@@ -316,7 +336,7 @@ pub async fn breakdown<C: Comparables + ?Sized>(
                 let (hi, lo) = if ai > bi { (ai, bi) } else { (bi, ai) };
                 q.stats.remove(hi);
                 q.stats.remove(lo);
-                let without_both = estimate(c, &q, limit, session, max_explicit).await?;
+                let without_both = estimate(c, &q, limit, 3, session, max_explicit).await?;
                 let drop_both = baseline.typical - without_both.typical;
                 let sum_individual = ranked[0].delta_divine + ranked[1].delta_divine;
                 // Super-additive synergy: A and B are worth more together than apart.
@@ -589,6 +609,7 @@ mod tests {
             &self,
             q: &TradeQuery,
             _limit: usize,
+            _max_relax: usize,
             _session: &TradeSession,
         ) -> anyhow::Result<Vec<Listing>> {
             // base 5; +10 if "spell" present; +2 if "crit" present; +6 extra if BOTH (synergy)
@@ -638,6 +659,7 @@ mod tests {
             &FakePricer,
             &two_stat_query(),
             10,
+            0,
             &TradeSession::for_test(),
             None,
         )
@@ -661,6 +683,7 @@ mod tests {
             &self,
             _q: &TradeQuery,
             _limit: usize,
+            _max_relax: usize,
             _session: &TradeSession,
         ) -> anyhow::Result<Vec<Listing>> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -722,6 +745,7 @@ mod tests {
             &self,
             _q: &TradeQuery,
             _limit: usize,
+            _max_relax: usize,
             _session: &TradeSession,
         ) -> anyhow::Result<Vec<Listing>> {
             Ok(self.0.clone())
@@ -756,6 +780,7 @@ mod tests {
             &c,
             &two_stat_query(),
             30,
+            0,
             &TradeSession::for_test(),
             Some(4),
         )
@@ -781,6 +806,7 @@ mod tests {
             &c,
             &two_stat_query(),
             30,
+            0,
             &TradeSession::for_test(),
             Some(4),
         )
@@ -793,9 +819,16 @@ mod tests {
     #[tokio::test]
     async fn estimate_affixes_only_when_craftability_unknown() {
         let c = FixedListings(vec![listing_ec(0.03, 6), listing_ec(2.0, 4)]);
-        let est = estimate(&c, &two_stat_query(), 30, &TradeSession::for_test(), None)
-            .await
-            .unwrap();
+        let est = estimate(
+            &c,
+            &two_stat_query(),
+            30,
+            0,
+            &TradeSession::for_test(),
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(est.basis, EstimateBasis::AffixesOnly);
     }
 
@@ -825,6 +858,7 @@ mod tests {
             &c,
             &two_stat_query(),
             30,
+            0,
             &TradeSession::for_test(),
             Some(4),
         )
@@ -892,6 +926,7 @@ mod tests {
             &self,
             q: &TradeQuery,
             _l: usize,
+            _max_relax: usize,
             _s: &TradeSession,
         ) -> anyhow::Result<Vec<Listing>> {
             self.calls.fetch_add(1, Ordering::SeqCst);
@@ -914,7 +949,7 @@ mod tests {
                         6.0 + i as f64 * 0.01,
                         2,
                         &format!("{id}-{i}"),
-                        &[id.clone()],
+                        std::slice::from_ref(&id),
                     ));
                 }
             }

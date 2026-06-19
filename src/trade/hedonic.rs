@@ -42,6 +42,7 @@ fn quantile(sorted: &[f64], p: f64) -> f64 {
 
 /// Solve `(XᵀX) β = Xᵀy` by Gaussian elimination with partial pivoting.
 /// `x` rows already include a leading 1.0 (intercept). `None` if singular.
+#[allow(clippy::needless_range_loop)]
 fn ols(x: &[Vec<f64>], y: &[f64]) -> Option<Vec<f64>> {
     let k = x.first()?.len();
     // Normal equations.

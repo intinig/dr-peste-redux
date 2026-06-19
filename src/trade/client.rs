@@ -331,17 +331,23 @@ impl crate::trade::ablation::Comparables for TradeClient {
     /// baseline probe issued by both `price` and `breakdown`), keeping trade2
     /// traffic polite.  We never hold the mutex across an `.await`; the pattern
     /// is: lock → check/copy → unlock → await → lock → insert → unlock.
+    ///
+    /// Relaxation is caller-controlled via `max_relax`: the routing probe and
+    /// value-path sub-queries pass 0 (exact sampling), while breakdown probes
+    /// pass 3 to recover enough comparables for delta measurement.
     async fn comparables(
         &self,
         query: &crate::trade::model::TradeQuery,
         limit: usize,
+        max_relax: usize,
         session: &TradeSession,
     ) -> anyhow::Result<Vec<crate::trade::model::Listing>> {
         use std::time::{Duration, Instant};
 
         let key = format!(
-            "{}|{}",
+            "{}|{}|{}",
             limit,
+            max_relax,
             serde_json::to_string(query).unwrap_or_default()
         );
 
@@ -361,13 +367,9 @@ impl crate::trade::ablation::Comparables for TradeClient {
         }
 
         // --- await (no mutex held) ---
-        // No relaxation (max_relax = 0): the routing probe and value-path
-        // base/per-mod sampling must see the true exact-query result so thin
-        // items correctly enter the hedonic value path. The marginal-value path
-        // is the broadening mechanism; relaxation here would measure a relaxed
-        // count, defeating the routing gate.
         let result =
-            crate::trade::ablation::gather_comparables(self, query, limit, 0, session).await?;
+            crate::trade::ablation::gather_comparables(self, query, limit, max_relax, session)
+                .await?;
 
         // --- lock, prune expired, insert, unlock ---
         {
