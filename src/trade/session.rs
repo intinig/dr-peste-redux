@@ -8,6 +8,7 @@ use reqwest::header::{self, HeaderValue};
 use secrecy::{ExposeSecret, SecretString};
 
 use crate::trade::client::{TRADE_BASE, USER_AGENT};
+use crate::trade::limiter::RateLimiter;
 
 /// Operator-configured IPRoyal residential proxy.
 /// No `Debug` derive: `pass` is an operator secret.
@@ -53,6 +54,7 @@ pub fn sticky_proxy_url(cfg: &ProxyConfig, user_id: u64) -> String {
 pub struct TradeSession {
     pub client: Arc<reqwest::Client>,
     pub cookie: Arc<SecretString>,
+    pub limiter: Arc<RateLimiter>,
 }
 
 impl TradeSession {
@@ -62,6 +64,7 @@ impl TradeSession {
         TradeSession {
             client: Arc::new(reqwest::Client::new()),
             cookie: Arc::new(SecretString::new("test-cookie".to_string())),
+            limiter: Arc::new(RateLimiter::permissive()),
         }
     }
 }
@@ -76,6 +79,7 @@ struct MemberSession {
 pub struct MemberSessions {
     sessions: RwLock<HashMap<u64, MemberSession>>,
     clients: RwLock<HashMap<u64, Arc<reqwest::Client>>>,
+    limiters: RwLock<HashMap<u64, Arc<RateLimiter>>>,
     proxy: Option<ProxyConfig>,
     ttl: Duration,
 }
@@ -85,6 +89,7 @@ impl MemberSessions {
         MemberSessions {
             sessions: RwLock::new(HashMap::new()),
             clients: RwLock::new(HashMap::new()),
+            limiters: RwLock::new(HashMap::new()),
             proxy,
             ttl,
         }
@@ -107,6 +112,17 @@ impl MemberSessions {
             .unwrap()
             .insert(user_id, client.clone());
         Ok(client)
+    }
+
+    /// A member's rate limiter (built once, cached). Independent per member so
+    /// each paces against their own account+IP budget.
+    fn limiter_for(&self, user_id: u64) -> Arc<RateLimiter> {
+        if let Some(l) = self.limiters.read().unwrap().get(&user_id) {
+            return l.clone();
+        }
+        let l = Arc::new(RateLimiter::new());
+        self.limiters.write().unwrap().insert(user_id, l.clone());
+        l
     }
 
     /// Validate connectivity (the trade site responds through the member's
@@ -158,7 +174,12 @@ impl MemberSessions {
         match found {
             Found::Live(cookie) => {
                 let client = self.build_client(user_id).ok()?;
-                Some(TradeSession { client, cookie })
+                let limiter = self.limiter_for(user_id);
+                Some(TradeSession {
+                    client,
+                    cookie,
+                    limiter,
+                })
             }
             // Evict on TTL: drop the session + cached client so the cookie does
             // not linger in memory past the advertised expiry window.
@@ -173,6 +194,7 @@ impl MemberSessions {
     pub fn forget(&self, user_id: u64) {
         self.sessions.write().unwrap().remove(&user_id);
         self.clients.write().unwrap().remove(&user_id);
+        self.limiters.write().unwrap().remove(&user_id);
     }
 }
 
