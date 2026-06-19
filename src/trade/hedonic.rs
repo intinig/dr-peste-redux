@@ -151,9 +151,10 @@ pub fn model_price(listings: &[Listing], our_ids: &[String]) -> Option<Predictio
         p.sort_by(|a, b| a.partial_cmp(b).unwrap());
         quantile(&p, 0.50)
     };
+    let p50 = p50.max(base_median);
     Some(Prediction {
-        p20: p20.max(0.0),
-        p50: p50.max(base_median),
+        p20: p20.max(0.0).min(p50),
+        p50,
         p80: p80.max(p50),
         sample: kept.len(),
         kept_features: keep_cols.len(),

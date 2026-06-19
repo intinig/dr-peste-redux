@@ -361,8 +361,13 @@ impl crate::trade::ablation::Comparables for TradeClient {
         }
 
         // --- await (no mutex held) ---
+        // No relaxation (max_relax = 0): the routing probe and value-path
+        // base/per-mod sampling must see the true exact-query result so thin
+        // items correctly enter the hedonic value path. The marginal-value path
+        // is the broadening mechanism; relaxation here would measure a relaxed
+        // count, defeating the routing gate.
         let result =
-            crate::trade::ablation::gather_comparables(self, query, limit, 3, session).await?;
+            crate::trade::ablation::gather_comparables(self, query, limit, 0, session).await?;
 
         // --- lock, prune expired, insert, unlock ---
         {

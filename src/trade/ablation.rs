@@ -67,10 +67,11 @@ pub async fn marginal_estimate<C: Comparables + ?Sized>(
     pool.sort_by(|a, b| a.id.cmp(&b.id));
     pool.dedup_by(|a, b| a.id == b.id && !a.id.is_empty());
 
-    let pool = craftability_filter(&pool, max_explicit);
+    let deduped = pool;
+    let filtered = craftability_filter(&deduped, max_explicit);
     let our_ids: Vec<String> = query.stats.iter().map(|s| s.id.clone()).collect();
 
-    match crate::trade::hedonic::model_price(&pool, &our_ids) {
+    match crate::trade::hedonic::model_price(&filtered, &our_ids) {
         Some(p) => {
             let confidence = if p.sample >= 30 && p.kept_features * 2 >= n.max(1) {
                 Confidence::Medium
@@ -81,14 +82,23 @@ pub async fn marginal_estimate<C: Comparables + ?Sized>(
                 low: p.p20,
                 typical: p.p50,
                 high: p.p80,
-                listing_count: pool.len(),
+                listing_count: filtered.len(),
                 confidence,
-                modal_currency: modal_currency(&pool),
+                modal_currency: modal_currency(&filtered),
                 basis: EstimateBasis::Marginal,
             })
         }
-        // Too thin/collinear to model → broad base-tier percentile, Low confidence.
-        None => Ok(estimate_from(&pool, EstimateBasis::BroadMarket)),
+        // Too thin/collinear to model, or filtered pool empty (e.g. fetch omitted
+        // mods) → price the broad base population so we never resurface
+        // "No comparable listings found".
+        None => {
+            let fallback = if filtered.is_empty() {
+                &deduped
+            } else {
+                &filtered
+            };
+            Ok(estimate_from(fallback, EstimateBasis::BroadMarket))
+        }
     }
 }
 
@@ -942,5 +952,7 @@ mod tests {
         // base + each of 2 stats = 3 sub-queries.
         assert_eq!(*prog.last.lock().unwrap(), 3);
         assert_eq!(prog.hits.load(Ordering::SeqCst), 1);
+        // Assert the sampler actually issued 3 sub-queries (1 base + 2 per-stat).
+        assert_eq!(fake.calls.load(Ordering::SeqCst), 3);
     }
 }
