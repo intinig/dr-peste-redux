@@ -19,6 +19,11 @@ pub(crate) const TRADE_BASE: &str = "https://www.pathofexile.com/api/trade2";
 pub(crate) const USER_AGENT: &str =
     "dr-peste-redux/0.1 (Discord guild price bot; not affiliated with Grinding Gear Games)";
 
+/// Max item ids per trade2 `/fetch` request. Verified live: 10 ids → HTTP 200,
+/// 11+ → HTTP 400 `{"error":{"code":2,"message":"Invalid query"}}`. `fetch`
+/// batches its hashes into groups of this size.
+const FETCH_BATCH: usize = 10;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct RateRule {
     pub max: u32,
@@ -76,6 +81,13 @@ fn explicit_stat_ids(item: &Value) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Splits fetch hashes into comma-joined batches of at most `FETCH_BATCH` ids,
+/// because trade2's `/fetch` rejects requests with more than 10 ids. An empty
+/// input yields no batches.
+fn fetch_batches(hashes: &[String]) -> Vec<String> {
+    hashes.chunks(FETCH_BATCH).map(|c| c.join(",")).collect()
 }
 
 /// Parses an `X-Rate-Limit-*` value: comma-separated `max:period:restriction`.
@@ -306,20 +318,22 @@ impl TradeApi for TradeClient {
         hashes: &[String],
         session: &TradeSession,
     ) -> Result<Vec<Listing>> {
-        if hashes.is_empty() {
-            return Ok(Vec::new());
+        // trade2 /fetch caps at 10 ids per request (>10 → HTTP 400), so fetch in
+        // batches and concatenate. Each batch is paced by the limiter.
+        let mut listings = Vec::new();
+        for csv in fetch_batches(hashes) {
+            let url = format!("{TRADE_BASE}/fetch/{csv}?query={query_id}");
+            let v: Value = self
+                .send_with_retry(&session.limiter, Endpoint::Fetch, || {
+                    with_cookie(session.client.get(&url), &session.cookie)
+                })
+                .await
+                .context("trade2 fetch failed")?
+                .json()
+                .await?;
+            listings.extend(self.parse_fetch(&v));
         }
-        let csv = hashes.join(",");
-        let url = format!("{TRADE_BASE}/fetch/{csv}?query={query_id}");
-        let v: Value = self
-            .send_with_retry(&session.limiter, Endpoint::Fetch, || {
-                with_cookie(session.client.get(&url), &session.cookie)
-            })
-            .await
-            .context("trade2 fetch failed")?
-            .json()
-            .await?;
-        Ok(self.parse_fetch(&v))
+        Ok(listings)
     }
 }
 
@@ -533,6 +547,20 @@ mod tests {
         let ls = client.parse_fetch(&v);
         // "stat." prefix stripped to match StatFilter ids.
         assert_eq!(ls[0].explicit_stat_ids, vec!["explicit.stat_999"]);
+    }
+
+    #[test]
+    fn fetch_batches_caps_at_ten_ids() {
+        let hashes: Vec<String> = (0..25).map(|i| format!("h{i}")).collect();
+        let batches = fetch_batches(&hashes);
+        assert_eq!(batches.len(), 3); // 10 + 10 + 5
+        assert!(
+            batches.iter().all(|b| b.split(',').count() <= FETCH_BATCH),
+            "no batch may exceed the trade2 10-id /fetch cap"
+        );
+        assert_eq!(batches[0].split(',').count(), 10);
+        assert_eq!(batches[2].split(',').count(), 5);
+        assert!(fetch_batches(&[]).is_empty()); // empty input → no requests
     }
 
     #[tokio::test]
