@@ -27,14 +27,11 @@ pub fn build_baseline(
     catalog: &StatCatalog,
     league: &str,
 ) -> TradeQuery {
-    let all_stats: Vec<_> = item
-        .implicits
-        .iter()
-        .chain(&item.enchants)
-        .chain(&item.runes)
-        .chain(&item.explicits)
-        .cloned()
-        .collect();
+    // Only the item's explicit affixes drive value/comparable filters. Runes are
+    // buyer-added sockets, implicits are base-inherent, enchants are added — none
+    // should constrain the comparable search (they over-collapse it; see the
+    // marginal-pricing design).
+    let all_stats: Vec<_> = item.explicits.to_vec();
 
     let mut stats: Vec<StatFilter> = Vec::new();
 
@@ -85,12 +82,9 @@ pub fn build_baseline(
     // Individual (non-fungible) mods: map each to its trade2 stat id and add a
     // banded filter. Mods already covered by a pseudo aggregate are skipped to
     // avoid double-constraining; unmatched mods are logged and skipped.
-    let buckets = [
-        (&item.implicits, StatGroup::Implicit),
-        (&item.enchants, StatGroup::Enchant),
-        (&item.runes, StatGroup::Rune),
-        (&item.explicits, StatGroup::Explicit),
-    ];
+    // Only explicit affixes are considered — runes/implicits/enchants are
+    // excluded for the same reason as above (they over-collapse comparables).
+    let buckets = [(&item.explicits, StatGroup::Explicit)];
     for (mods, group) in buckets {
         for m in mods {
             if pseudo.covers(&m.raw) {
@@ -138,6 +132,16 @@ pub fn build_baseline(
             corrupted: Some(item.corrupted),
         },
         equipment,
+    }
+}
+
+/// The same query with all stat filters removed (type + misc + equipment kept).
+/// Used by the marginal-contribution sampler to fetch the base population.
+#[allow(dead_code)] // consumed by the ablation sampler (upcoming task)
+pub fn base_query(q: &TradeQuery) -> TradeQuery {
+    TradeQuery {
+        stats: Vec::new(),
+        ..q.clone()
     }
 }
 
@@ -431,9 +435,15 @@ mod tests {
     }
 
     #[test]
-    fn rune_resistance_folds_into_pseudo_total_elemental_resistance() {
+    fn rune_resistance_excluded_from_pseudo_total_elemental_resistance() {
         // Boots: cold-rune (+18), lightning explicit (+34), fire explicit (+39).
-        // Total elemental = 18+34+39 = 91; band lo = round(0.9*91) = 82.
+        // After the affix-explicits-only change, the rune's +18% is NOT counted.
+        // Total elemental = 34+39 = 73; band lo = round(0.9*73) = round(65.7) = 66.
+        //
+        // Concern surfaced: the previous test ("rune_resistance_folds_into_pseudo")
+        // verified the OLD behaviour where runes contributed to the pseudo aggregate
+        // (total 91, lo=82). That test has been updated here to document the new
+        // contract: runes are buyer-added and must not constrain comparables.
         let item = ParsedItem {
             rarity: Rarity::Rare,
             name: "Kraken Slippers".into(),
@@ -476,7 +486,82 @@ mod tests {
             .iter()
             .find(|s| s.id == "pseudo.pseudo_total_elemental_resistance")
             .expect("elemental resistance pseudo filter present");
-        // round(0.9 * 91) = round(81.9) = 82
-        assert_eq!(ele.min, Some(82.0), "rune resistance must fold into pseudo");
+        // round(0.9 * 73) = round(65.7) = 66  (rune +18 excluded)
+        assert_eq!(
+            ele.min,
+            Some(66.0),
+            "rune resistance must NOT fold into pseudo"
+        );
+    }
+
+    #[test]
+    fn build_baseline_ignores_runes_and_implicits() {
+        let item = ParsedItem {
+            rarity: crate::itemtext::Rarity::Rare,
+            name: "Onslaught Spell".into(),
+            base_type: Some("Chiming Staff".into()),
+            item_class: Some("Staves".into()),
+            item_level: Some(80),
+            quality: None,
+            corrupted: false,
+            energy_shield: None,
+            armour: None,
+            evasion: None,
+            implicits: vec![ItemStat {
+                raw: "10% increased Cast Speed".into(),
+                value: Some(10.0),
+                affix: None,
+            }],
+            enchants: vec![],
+            runes: vec![ItemStat {
+                raw: "+1 to Level of all Spell Skills".into(),
+                value: Some(1.0),
+                affix: None,
+            }],
+            explicits: vec![ItemStat {
+                raw: "201% increased Spell Physical Damage".into(),
+                value: Some(201.0),
+                affix: Some(crate::itemtext::Affix::Prefix),
+            }],
+        };
+        let catalog = StatCatalog::from_json(include_str!("fixtures/stats_sample.json")).unwrap();
+        let q = build_baseline(&item, &PseudoMap::load(), &catalog, "Standard");
+        // Only the explicit affix yields a filter (if the sample catalog matches it);
+        // the rune and implicit never do.
+        assert!(q
+            .stats
+            .iter()
+            .all(|s| !s.label.contains("all Spell Skills")));
+        assert!(q
+            .stats
+            .iter()
+            .all(|s| !s.label.contains("increased Cast Speed") || s.label.contains("Spell")));
+        // no implicit cast-speed filter
+    }
+
+    #[test]
+    fn base_query_clears_stats_keeps_type_and_misc() {
+        use crate::trade::model::{MiscFilters, StatFilter};
+        let q = TradeQuery {
+            league: "L".into(),
+            category: None,
+            type_line: Some("Chiming Staff".into()),
+            stats: vec![StatFilter {
+                id: "explicit.stat_1".into(),
+                label: "x".into(),
+                min: Some(1.0),
+                max: Some(2.0),
+            }],
+            misc: MiscFilters {
+                item_level_min: Some(80),
+                quality_min: None,
+                corrupted: Some(false),
+            },
+            equipment: vec![],
+        };
+        let b = base_query(&q);
+        assert!(b.stats.is_empty());
+        assert_eq!(b.type_line, q.type_line);
+        assert_eq!(b.misc.item_level_min, Some(80));
     }
 }
