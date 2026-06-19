@@ -51,6 +51,33 @@ fn affix_count(item: &Value) -> usize {
         .unwrap_or(0)
 }
 
+/// Normalised explicit stat ids for a fetched item: prefer
+/// `extended.hashes.explicit` (already `explicit.stat_*`), else strip the
+/// leading `stat.` from each `explicitMods[].hash`.
+fn explicit_stat_ids(item: &Value) -> Vec<String> {
+    if let Some(arr) = item
+        .pointer("/extended/hashes/explicit")
+        .and_then(|v| v.as_array())
+    {
+        let ids: Vec<String> = arr
+            .iter()
+            .filter_map(|pair| pair.get(0).and_then(|s| s.as_str()).map(String::from))
+            .collect();
+        if !ids.is_empty() {
+            return ids;
+        }
+    }
+    item.get("explicitMods")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| m.get("hash").and_then(|h| h.as_str()))
+                .map(|h| h.strip_prefix("stat.").unwrap_or(h).to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Parses an `X-Rate-Limit-*` value: comma-separated `max:period:restriction`.
 pub fn parse_rate_rules(header_value: &str) -> Vec<RateRule> {
     header_value
@@ -174,7 +201,16 @@ impl TradeClient {
                         if price_divine <= 0.0 {
                             return None;
                         }
-                        let explicit_count = entry.get("item").map(affix_count).unwrap_or(0);
+                        let item = entry.get("item");
+                        let explicit_count = item.map(affix_count).unwrap_or(0);
+                        // NB: `stat_ids` not `explicit_stat_ids` — avoid shadowing
+                        // the free `explicit_stat_ids` fn used on the same line.
+                        let stat_ids = item.map(explicit_stat_ids).unwrap_or_default();
+                        let id = entry
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string();
                         let money = Money {
                             amount,
                             currency: Self::parse_currency(code),
@@ -183,6 +219,8 @@ impl TradeClient {
                             price: money,
                             price_divine,
                             explicit_count,
+                            id,
+                            explicit_stat_ids: stat_ids,
                         })
                     })
                     .collect()
@@ -445,6 +483,49 @@ mod tests {
         assert_eq!(ec(2.0), 2); // per-affix, NOT the 3 lines
         assert_eq!(ec(3.0), 4); // line count
         assert_eq!(ec(4.0), 0); // unknown
+    }
+
+    #[test]
+    fn parse_fetch_extracts_id_and_stat_ids() {
+        let client = test_client();
+        let v = serde_json::json!({
+            "result": [{
+                "id": "abc123",
+                "listing": { "price": { "amount": 1.0, "currency": "divine" } },
+                "item": {
+                    "explicitMods": [
+                        { "hash": "stat.explicit.stat_2768835289", "mods": [] }
+                    ],
+                    "extended": {
+                        "hashes": { "explicit": [["explicit.stat_2768835289", [0]],
+                                                 ["explicit.stat_1050105434", [1]]] }
+                    }
+                }
+            }]
+        });
+        let ls = client.parse_fetch(&v);
+        assert_eq!(ls.len(), 1);
+        assert_eq!(ls[0].id, "abc123");
+        // Prefer extended.hashes.explicit (both ids), already normalised.
+        assert_eq!(
+            ls[0].explicit_stat_ids,
+            vec!["explicit.stat_2768835289", "explicit.stat_1050105434"]
+        );
+    }
+
+    #[test]
+    fn parse_fetch_stat_ids_fall_back_to_explicit_mods_hash() {
+        let client = test_client();
+        let v = serde_json::json!({
+            "result": [{
+                "id": "x",
+                "listing": { "price": { "amount": 1.0, "currency": "divine" } },
+                "item": { "explicitMods": [ { "hash": "stat.explicit.stat_999" } ] }
+            }]
+        });
+        let ls = client.parse_fetch(&v);
+        // "stat." prefix stripped to match StatFilter ids.
+        assert_eq!(ls[0].explicit_stat_ids, vec!["explicit.stat_999"]);
     }
 
     #[tokio::test]
