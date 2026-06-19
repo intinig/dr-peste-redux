@@ -3,6 +3,7 @@
 
 pub mod ablation;
 pub mod client;
+pub mod hedonic;
 pub mod limiter;
 pub mod model;
 pub mod pseudo;
