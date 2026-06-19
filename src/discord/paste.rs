@@ -97,6 +97,29 @@ async fn price_rare(
     prompt_connect(ctx, parsed, league).await
 }
 
+// `Context` is `Copy` (the existing code already uses `*ctx`), so hold it by value
+// to avoid a nested `&'a Context<'a>` lifetime.
+struct ReplyProgress<'a> {
+    ctx: Context<'a>,
+    reply: &'a poise::ReplyHandle<'a>,
+}
+
+#[async_trait::async_trait]
+impl crate::trade::ablation::PriceProgress for ReplyProgress<'_> {
+    async fn value_path(&self, sub_queries: usize, eta: std::time::Duration) {
+        let secs = eta.as_secs().max(1);
+        let _ = self
+            .reply
+            .edit(
+                self.ctx,
+                poise::CreateReply::default().content(format!(
+                    "⏳ Heavily-modded item — modelling its value from {sub_queries} market samples (~{secs}s)…"
+                )),
+            )
+            .await;
+    }
+}
+
 async fn run_pricing(
     ctx: &Context<'_>,
     parsed: &itemtext::ParsedItem,
@@ -106,20 +129,23 @@ async fn run_pricing(
     use poise::serenity_prelude as serenity;
 
     let pricer = ctx.data().pricer.clone();
-    // TODO(Task 6): replace NoProgress with a real Discord progress reporter.
-    let est = match pricer
-        .price(
-            parsed,
-            &league.name,
-            session,
-            &crate::trade::ablation::NoProgress,
-        )
-        .await
-    {
+    let reply = ctx
+        .send(poise::CreateReply::default().content("⏳ Pricing…"))
+        .await?;
+    let progress = ReplyProgress {
+        ctx: *ctx,
+        reply: &reply,
+    };
+    let est = match pricer.price(parsed, &league.name, session, &progress).await {
         Ok(e) => e,
         Err(e) => {
             tracing::warn!(error = %e, "trade price failed");
-            ctx.say("Couldn't reach trade right now — try again shortly.")
+            reply
+                .edit(
+                    *ctx,
+                    poise::CreateReply::default()
+                        .content("Couldn't reach trade right now — try again shortly."),
+                )
                 .await?;
             return Ok(());
         }
@@ -142,8 +168,9 @@ async fn run_pricing(
     let row = serenity::CreateActionRow::Buttons(vec![button]);
 
     let author = ctx.author().id;
-    let reply = ctx
-        .send(
+    reply
+        .edit(
+            *ctx,
             poise::CreateReply::default()
                 .embed(embeds::estimate_embed(parsed, &est, league, secondary_rate))
                 .components(vec![row]),
