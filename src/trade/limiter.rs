@@ -151,7 +151,6 @@ impl RateLimiter {
         }
     }
 
-    #[allow(dead_code)]
     /// Ballpark wall-clock to send `n` more requests on `ep`, from the current
     /// window + learned rules. Best-effort: if the bucket is momentarily locked,
     /// estimates against an empty window.
@@ -226,7 +225,6 @@ fn wait_secs(rules: &[RateRule], ages: &[f64]) -> f64 {
     wait.max(0.0)
 }
 
-#[allow(dead_code)]
 /// Expected seconds to send `n` more requests, simulating the sliding window
 /// forward: each request waits `wait_secs` then occupies a slot. `ages` are the
 /// current window's send ages (ascending), as in `wait_secs`.

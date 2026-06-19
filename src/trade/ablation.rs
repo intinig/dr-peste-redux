@@ -1,14 +1,18 @@
 //! Ablation pricing: gather comparables (relaxing thin queries), estimate a
 //! price, and break a price down into per-characteristic contributions.
 
+use std::time::Duration;
+
 use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::trade::client::TradeApi;
+use crate::trade::limiter::Endpoint;
 use crate::trade::model::{
     AblationKind, Breakdown, Confidence, Contribution, Currency, EstimateBasis, Listing,
     PriceEstimate, SynergyNote, TradeQuery,
 };
+use crate::trade::query::base_query;
 use crate::trade::session::TradeSession;
 
 /// High-level seam the pricer depends on. `TradeClient` implements it via
@@ -23,6 +27,71 @@ pub trait Comparables {
     ) -> Result<Vec<Listing>>;
 }
 
+/// Reports the value path's latency estimate to the caller before the wait.
+#[async_trait]
+pub trait PriceProgress: Send + Sync {
+    async fn value_path(&self, sub_queries: usize, eta: Duration);
+}
+
+/// No-op progress for tests and non-interactive callers.
+pub struct NoProgress;
+#[async_trait]
+impl PriceProgress for NoProgress {
+    async fn value_path(&self, _sub_queries: usize, _eta: Duration) {}
+}
+
+/// Derive an estimate when the exact query is too thin: sample base + each mod,
+/// fit a marginal-contribution model, predict the full item. Falls back to a
+/// broad base-tier percentile when the model can't fit. Never errors on thin data.
+pub async fn marginal_estimate<C: Comparables + ?Sized>(
+    c: &C,
+    query: &TradeQuery,
+    limit: usize,
+    session: &TradeSession,
+    max_explicit: usize,
+    progress: &dyn PriceProgress,
+) -> Result<PriceEstimate> {
+    let n = query.stats.len();
+    let eta = session.limiter.estimate(Endpoint::Search, n + 1)
+        + session.limiter.estimate(Endpoint::Fetch, n + 1);
+    progress.value_path(n + 1, eta).await;
+
+    let base = base_query(query);
+    let mut pool = c.comparables(&base, limit, session).await?;
+    for s in &query.stats {
+        let mut q = base.clone();
+        q.stats = vec![s.clone()];
+        pool.extend(c.comparables(&q, limit, session).await?);
+    }
+    // Dedup by listing id (a rare returned by several sub-queries counts once).
+    pool.sort_by(|a, b| a.id.cmp(&b.id));
+    pool.dedup_by(|a, b| a.id == b.id && !a.id.is_empty());
+
+    let pool = craftability_filter(&pool, max_explicit);
+    let our_ids: Vec<String> = query.stats.iter().map(|s| s.id.clone()).collect();
+
+    match crate::trade::hedonic::model_price(&pool, &our_ids) {
+        Some(p) => {
+            let confidence = if p.sample >= 30 && p.kept_features * 2 >= n.max(1) {
+                Confidence::Medium
+            } else {
+                Confidence::Low
+            };
+            Ok(PriceEstimate {
+                low: p.p20,
+                typical: p.p50,
+                high: p.p80,
+                listing_count: pool.len(),
+                confidence,
+                modal_currency: modal_currency(&pool),
+                basis: EstimateBasis::Marginal,
+            })
+        }
+        // Too thin/collinear to model → broad base-tier percentile, Low confidence.
+        None => Ok(estimate_from(&pool, EstimateBasis::BroadMarket)),
+    }
+}
+
 /// Hard cap on how many stats a single breakdown will probe, to bound the
 /// query budget for pathological items. Normal rares have far fewer.
 const PROBE_CEILING: usize = 16;
@@ -34,7 +103,7 @@ const TRIM_MIN_N: usize = 8;
 /// Relax the query (drop a filter) only while the constrained search yields fewer
 /// comparables than this. Decoupled from the fetch cap (COMPARABLE_SAMPLE): a query
 /// returning, say, 60 exact matches must NOT be relaxed just because it's < the cap.
-const MIN_COMPARABLES: usize = 10;
+pub(crate) const MIN_COMPARABLES: usize = 10;
 
 /// Searches + fetches up to `limit` cheapest listings. If fewer than `MIN_COMPARABLES`
 /// are found, relaxes the query (drops the last stat filter, then the last
@@ -305,6 +374,7 @@ mod tests {
     };
     use crate::trade::session::TradeSession;
     use async_trait::async_trait;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
 
     fn listing(divine: f64) -> Listing {
@@ -787,5 +857,90 @@ mod tests {
         };
         let url2 = trade_url(&q2);
         assert!(url2.ends_with("/poe2/A%2FB"), "{url2}");
+    }
+
+    /// Listing with explicit stat ids and a specific id, for marginal estimate tests.
+    pub(super) fn listing_full(divine: f64, ec: usize, id: &str, ids: &[String]) -> Listing {
+        Listing {
+            price: Money {
+                amount: divine,
+                currency: Currency::Divine,
+            },
+            price_divine: divine,
+            explicit_count: ec,
+            id: id.to_string(),
+            explicit_stat_ids: ids.to_vec(),
+        }
+    }
+
+    struct CountingFake {
+        calls: AtomicUsize,
+    }
+    #[async_trait]
+    impl Comparables for CountingFake {
+        async fn comparables(
+            &self,
+            q: &TradeQuery,
+            _l: usize,
+            _s: &TradeSession,
+        ) -> anyhow::Result<Vec<Listing>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            // base (no stats) → 30 cheap 1-affix items; base+stat → pricier items
+            // carrying that stat id, so the model can fit.
+            let mut v = Vec::new();
+            if q.stats.is_empty() {
+                for i in 0..30 {
+                    v.push(listing_full(
+                        2.0 + i as f64 * 0.01,
+                        2,
+                        &format!("base-{i}"),
+                        &[],
+                    ));
+                }
+            } else {
+                let id = q.stats[0].id.clone();
+                for i in 0..30 {
+                    v.push(listing_full(
+                        6.0 + i as f64 * 0.01,
+                        2,
+                        &format!("{id}-{i}"),
+                        &[id.clone()],
+                    ));
+                }
+            }
+            Ok(v)
+        }
+    }
+
+    struct RecProgress {
+        hits: AtomicUsize,
+        last: std::sync::Mutex<usize>,
+    }
+    #[async_trait]
+    impl PriceProgress for RecProgress {
+        async fn value_path(&self, sub_queries: usize, _eta: std::time::Duration) {
+            self.hits.fetch_add(1, Ordering::SeqCst);
+            *self.last.lock().unwrap() = sub_queries;
+        }
+    }
+
+    #[tokio::test]
+    async fn marginal_estimate_fits_and_reports_progress() {
+        let fake = CountingFake {
+            calls: AtomicUsize::new(0),
+        };
+        let prog = RecProgress {
+            hits: AtomicUsize::new(0),
+            last: std::sync::Mutex::new(0),
+        };
+        let q = two_stat_query(); // 2 stat filters (existing helper)
+        let est = marginal_estimate(&fake, &q, 100, &TradeSession::for_test(), 6, &prog)
+            .await
+            .unwrap();
+        assert_eq!(est.basis, EstimateBasis::Marginal);
+        assert!(est.typical > 0.0);
+        // base + each of 2 stats = 3 sub-queries.
+        assert_eq!(*prog.last.lock().unwrap(), 3);
+        assert_eq!(prog.hits.load(Ordering::SeqCst), 1);
     }
 }

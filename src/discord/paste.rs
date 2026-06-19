@@ -106,7 +106,16 @@ async fn run_pricing(
     use poise::serenity_prelude as serenity;
 
     let pricer = ctx.data().pricer.clone();
-    let est = match pricer.price(parsed, &league.name, session).await {
+    // TODO(Task 6): replace NoProgress with a real Discord progress reporter.
+    let est = match pricer
+        .price(
+            parsed,
+            &league.name,
+            session,
+            &crate::trade::ablation::NoProgress,
+        )
+        .await
+    {
         Ok(e) => e,
         Err(e) => {
             tracing::warn!(error = %e, "trade price failed");

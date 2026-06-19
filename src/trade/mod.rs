@@ -16,7 +16,7 @@ use anyhow::Result;
 
 use crate::itemtext::ParsedItem;
 use crate::pricelog::ProbeLog;
-use crate::trade::ablation::{estimate, Comparables};
+use crate::trade::ablation::{estimate, Comparables, MIN_COMPARABLES};
 use crate::trade::model::{Breakdown, PriceEstimate, Probe};
 use crate::trade::pseudo::PseudoMap;
 use crate::trade::query::build_baseline;
@@ -55,10 +55,11 @@ impl<C: Comparables> TradePricer<C> {
         item: &ParsedItem,
         league: &str,
         session: &TradeSession,
+        progress: &dyn crate::trade::ablation::PriceProgress,
     ) -> Result<PriceEstimate> {
         let query = build_baseline(item, &self.pseudo, &self.catalog, league);
         let max_explicit = item.craftability().map(|c| c.explicit_count as usize);
-        let est = estimate(
+        let exact = estimate(
             &self.comparables,
             &query,
             COMPARABLE_SAMPLE,
@@ -66,6 +67,21 @@ impl<C: Comparables> TradePricer<C> {
             max_explicit,
         )
         .await?;
+        // Fast path: enough exact comparables, or craftability unknown (can't model).
+        let est = match max_explicit {
+            Some(max) if exact.listing_count < MIN_COMPARABLES => {
+                crate::trade::ablation::marginal_estimate(
+                    &self.comparables,
+                    &query,
+                    COMPARABLE_SAMPLE,
+                    session,
+                    max,
+                    progress,
+                )
+                .await?
+            }
+            _ => exact,
+        };
         self.record(&query, &est);
         Ok(est)
     }
@@ -176,7 +192,12 @@ mod tests {
             log,
         );
         let est = pricer
-            .price(&ring(), "Standard", &TradeSession::for_test())
+            .price(
+                &ring(),
+                "Standard",
+                &TradeSession::for_test(),
+                &crate::trade::ablation::NoProgress,
+            )
             .await
             .unwrap();
         assert_eq!(est.typical, 12.0);

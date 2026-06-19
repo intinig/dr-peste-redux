@@ -137,7 +137,6 @@ pub fn build_baseline(
 
 /// The same query with all stat filters removed (type + misc + equipment kept).
 /// Used by the marginal-contribution sampler to fetch the base population.
-#[allow(dead_code)] // consumed by the ablation sampler (upcoming task)
 pub fn base_query(q: &TradeQuery) -> TradeQuery {
     TradeQuery {
         stats: Vec::new(),

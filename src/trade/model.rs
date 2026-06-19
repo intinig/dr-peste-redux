@@ -112,6 +112,9 @@ pub enum EstimateBasis {
     BroadMarket,
     /// Craftability unknown (basic clipboard) → unfiltered, affixes-only.
     AffixesOnly,
+    /// Exact comparables too thin → value derived from a marginal-contribution
+    /// (hedonic) model over partial-overlap comparables.
+    Marginal,
 }
 
 impl Confidence {
