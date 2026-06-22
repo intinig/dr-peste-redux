@@ -114,7 +114,7 @@ pub fn build_baseline(
         .item_class
         .as_deref()
         .map(crate::trade::value::canonical_category)
-        .and_then(|c| value.category(&c))
+        .and_then(|c| value.category(league, &c))
         .filter(|m| m.sample_size >= crate::trade::value::MIN_CATEGORY_SAMPLE);
 
     // Per-mod explicit filters, tagged for ordering. Cornerstones are searched

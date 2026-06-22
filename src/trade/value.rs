@@ -74,10 +74,13 @@ pub fn canonical_category(raw: &str) -> String {
     canon.to_string()
 }
 
-/// Per-category descriptive value model. Keyed by canonical trade2 category text.
+/// Descriptive value model, partitioned by league then canonical trade2 category.
+/// League keying keeps a prior-league or Standard harvest from polluting the
+/// active league's drivers — observations carry their league, and pricing/insights
+/// always look up the active league.
 #[derive(Debug, Default, Clone)]
 pub struct ValueModel {
-    categories: HashMap<String, CategoryModel>,
+    leagues: HashMap<String, HashMap<String, CategoryModel>>,
 }
 
 /// Aggregated value signal for one category. Includes per-stat driver metrics.
@@ -101,30 +104,45 @@ impl CategoryModel {
 }
 
 impl ValueModel {
-    pub fn category(&self, canon: &str) -> Option<&CategoryModel> {
-        self.categories.get(canon)
+    /// The model for one category within a league, if present.
+    pub fn category(&self, league: &str, canon: &str) -> Option<&CategoryModel> {
+        self.leagues.get(league)?.get(canon)
     }
 
-    /// Categories ordered by descending sample size (largest corpus first).
-    pub fn categories_sorted(&self) -> Vec<&CategoryModel> {
-        let mut v: Vec<&CategoryModel> = self.categories.values().collect();
+    /// A league's categories ordered by descending sample size (largest first).
+    /// Empty if the league has no observations yet.
+    pub fn categories_sorted(&self, league: &str) -> Vec<&CategoryModel> {
+        let mut v: Vec<&CategoryModel> = match self.leagues.get(league) {
+            Some(cats) => cats.values().collect(),
+            None => return Vec::new(),
+        };
         v.sort_by_key(|c| std::cmp::Reverse(c.sample_size));
         v
     }
 
     pub fn build(observations: &[Observation]) -> ValueModel {
-        let mut by_cat: HashMap<String, Vec<&Observation>> = HashMap::new();
+        // Group by league, then canonical category.
+        let mut by_league: HashMap<String, HashMap<String, Vec<&Observation>>> = HashMap::new();
         for o in observations {
             let Some(raw) = o.category.as_deref() else {
                 continue;
             };
-            by_cat.entry(canonical_category(raw)).or_default().push(o);
+            by_league
+                .entry(o.league.clone())
+                .or_default()
+                .entry(canonical_category(raw))
+                .or_default()
+                .push(o);
         }
-        let mut categories = HashMap::new();
-        for (category, obs) in by_cat {
-            categories.insert(category.clone(), build_category(category, &obs));
+        let mut leagues = HashMap::new();
+        for (league, by_cat) in by_league {
+            let mut categories = HashMap::new();
+            for (category, obs) in by_cat {
+                categories.insert(category.clone(), build_category(category, &obs));
+            }
+            leagues.insert(league, categories);
         }
-        ValueModel { categories }
+        ValueModel { leagues }
     }
 }
 
@@ -132,7 +150,7 @@ impl ValueModel {
 /// reads are corrupt-line-tolerant; a poisoned lock is recovered, never panicked.
 pub fn rebuild_into(log: &ObservationLog, slot: &RwLock<ValueModel>) {
     let model = ValueModel::build(&log.read_all());
-    let n = model.categories.len();
+    let n: usize = model.leagues.values().map(HashMap::len).sum();
     *slot.write().unwrap_or_else(|e| e.into_inner()) = model;
     tracing::info!(categories = n, "value model rebuilt");
 }
@@ -449,10 +467,51 @@ mod tests {
             ob("Staff", 5.0, &["explicit.b"]),
         ];
         let model = ValueModel::build(&corpus);
-        let cat = model.category("Staff").expect("Staff category present");
+        let cat = model
+            .category("Standard", "Staff")
+            .expect("Staff category present");
         assert_eq!(cat.sample_size, 3);
         assert_eq!(cat.base_median, 3.0); // median of [1,3,5]
-        assert!(model.category("Staves").is_none()); // folded, not a separate key
+        assert!(model.category("Standard", "Staves").is_none()); // folded, not a separate key
+    }
+
+    #[test]
+    fn build_partitions_by_league() {
+        // Same category, two leagues: a driver in one league must not leak to the
+        // other. League "Old" has a strong driver "drv"; league "New" does not.
+        let mut corpus = Vec::new();
+        for _ in 0..30 {
+            corpus.push(Observation {
+                league: "Old".into(),
+                ..ob("Staff", 10.0, &["drv"])
+            });
+        }
+        for _ in 0..30 {
+            corpus.push(Observation {
+                league: "New".into(),
+                ..ob("Staff", 1.0, &["other"])
+            });
+        }
+        let model = ValueModel::build(&corpus);
+        // Each league has its own Staff model.
+        assert_eq!(model.category("Old", "Staff").unwrap().sample_size, 30);
+        assert_eq!(model.category("New", "Staff").unwrap().sample_size, 30);
+        // The "Old" driver does not appear in "New".
+        assert!(model
+            .category("Old", "Staff")
+            .unwrap()
+            .stats
+            .iter()
+            .any(|s| s.stat_id == "drv"));
+        assert!(!model
+            .category("New", "Staff")
+            .unwrap()
+            .stats
+            .iter()
+            .any(|s| s.stat_id == "drv"));
+        // categories_sorted is league-scoped.
+        assert_eq!(model.categories_sorted("Old").len(), 1);
+        assert!(model.categories_sorted("Nonexistent").is_empty());
     }
 
     #[test]
@@ -466,7 +525,7 @@ mod tests {
             corpus.push(ob("Staff", 10.0, &["drv", "filler"]));
         }
         let model = ValueModel::build(&corpus);
-        let cat = model.category("Staff").unwrap();
+        let cat = model.category("Standard", "Staff").unwrap();
         let drv = cat.stats.iter().find(|s| s.stat_id == "drv").unwrap();
         assert_eq!(drv.count, 40);
         assert!(
@@ -498,7 +557,7 @@ mod tests {
         }
         // B never appears without A, and contributes nothing on its own.
         let model = ValueModel::build(&corpus);
-        let cat = model.category("Staff").unwrap();
+        let cat = model.category("Standard", "Staff").unwrap();
         let a = cat.stats.iter().find(|s| s.stat_id == "A").unwrap();
         let b = cat.stats.iter().find(|s| s.stat_id == "B").unwrap();
         // Both look strong univariately…
