@@ -5,7 +5,7 @@ use super::{Context, Error};
 use crate::trade::value::{canonical_category, MIN_CATEGORY_SAMPLE};
 use futures::Stream;
 
-/// Autocomplete: canonical category names present in the model, prefix-matched.
+/// Autocomplete: canonical category names present in the model, substring-matched.
 pub async fn autocomplete_insights_category<'a>(
     ctx: Context<'a>,
     partial: &'a str,
@@ -106,7 +106,7 @@ pub async fn insights(
                             body.push_str("\n**Top combos on expensive items:**\n");
                             for p in cat.cooccurrences.iter().take(5) {
                                 body.push_str(&format!(
-                                    "• {} + {} ({}×)\n",
+                                    "• {} + {} (n={})\n",
                                     label(&p.a, &None),
                                     label(&p.b, &None),
                                     p.count

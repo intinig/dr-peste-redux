@@ -108,7 +108,7 @@ impl ValueModel {
     /// Categories ordered by descending sample size (largest corpus first).
     pub fn categories_sorted(&self) -> Vec<&CategoryModel> {
         let mut v: Vec<&CategoryModel> = self.categories.values().collect();
-        v.sort_by(|a, b| b.sample_size.cmp(&a.sample_size));
+        v.sort_by_key(|c| std::cmp::Reverse(c.sample_size));
         v
     }
 
@@ -182,8 +182,10 @@ fn build_category(category: String, obs: &[&Observation]) -> CategoryModel {
     // which correctly reflects the marginal value of having the stat.
     let mut prices_without: HashMap<&str, Vec<f64>> = HashMap::new();
     for o in obs {
+        let present: std::collections::HashSet<&str> =
+            o.mods.iter().map(|m| m.stat_id.as_str()).collect();
         for id in prices_with.keys() {
-            if !o.mods.iter().any(|m| m.stat_id.as_str() == *id) {
+            if !present.contains(*id) {
                 prices_without.entry(id).or_default().push(o.price_divine);
             }
         }
