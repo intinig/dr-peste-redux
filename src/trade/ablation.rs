@@ -1,18 +1,14 @@
 //! Ablation pricing: gather comparables (relaxing thin queries), estimate a
 //! price, and break a price down into per-characteristic contributions.
 
-use std::time::Duration;
-
 use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::trade::client::TradeApi;
-use crate::trade::limiter::Endpoint;
 use crate::trade::model::{
     AblationKind, Breakdown, Confidence, Contribution, Currency, EstimateBasis, Listing,
     PriceEstimate, SynergyNote, TradeQuery,
 };
-use crate::trade::query::base_query;
 use crate::trade::session::TradeSession;
 
 /// High-level seam the pricer depends on. `TradeClient` implements it via
@@ -29,133 +25,6 @@ pub trait Comparables {
         max_relax: usize,
         session: &TradeSession,
     ) -> Result<Vec<Listing>>;
-}
-
-/// Reports the value path's latency estimate to the caller before the wait.
-#[async_trait]
-pub trait PriceProgress: Send + Sync {
-    async fn value_path(&self, sub_queries: usize, eta: Duration);
-}
-
-/// No-op progress for tests and non-interactive callers.
-#[cfg(test)]
-pub struct NoProgress;
-#[cfg(test)]
-#[async_trait]
-impl PriceProgress for NoProgress {
-    async fn value_path(&self, _sub_queries: usize, _eta: Duration) {}
-}
-
-pub async fn marginal_estimate<C: Comparables + ?Sized>(
-    c: &C,
-    query: &TradeQuery,
-    limit: usize,
-    session: &TradeSession,
-    max_explicit: usize,
-    progress: &dyn PriceProgress,
-) -> Result<PriceEstimate> {
-    use crate::trade::hedonic::{explicit_features, model_price, FeatureRow};
-
-    let n = query.stats.len().min(PROBE_CEILING);
-    let eta = session.limiter.estimate(Endpoint::Search, n + 1)
-        + session.limiter.estimate(Endpoint::Fetch, n + 1);
-    progress.value_path(n + 1, eta).await;
-
-    let our_ids: Vec<String> = query
-        .stats
-        .iter()
-        .take(PROBE_CEILING)
-        .map(|s| s.id.clone())
-        .collect();
-
-    // Sample base + each single mod, computing each listing's feature vector WITH
-    // PROVENANCE: a listing returned by the base sub-query gets only its explicit
-    // matches; a listing returned by the per-mod `i` sub-query is GUARANTEED to
-    // carry mod `i` (the trade2 search filtered on it, explicit or pseudo), so we
-    // force `features[i] = 1.0`. This lets pseudo aggregates — which never appear
-    // in `explicit_stat_ids` — contribute real signal instead of being dropped as
-    // an all-zero column.
-    let base = base_query(query);
-    let mut probed: Vec<(Listing, Vec<f64>)> = c
-        .comparables(&base, limit, 0, session)
-        .await?
-        .into_iter()
-        .map(|l| {
-            let feats = explicit_features(&l, &our_ids);
-            (l, feats)
-        })
-        .collect();
-    for (i, s) in query.stats.iter().take(PROBE_CEILING).enumerate() {
-        let mut q = base.clone();
-        q.stats = vec![s.clone()];
-        for l in c.comparables(&q, limit, 0, session).await? {
-            let mut feats = explicit_features(&l, &our_ids);
-            feats[i] = 1.0; // provenance: this sub-query filtered on mod `i`
-            probed.push((l, feats));
-        }
-    }
-
-    // Dedup by listing id, OR-ing feature vectors (a rare returned by several
-    // sub-queries carries the union of their mods → take the max per index).
-    // Empty-id listings can't be deduped, so each is kept as its own row.
-    probed.sort_by(|a, b| a.0.id.cmp(&b.0.id));
-    let mut deduped: Vec<(Listing, Vec<f64>)> = Vec::with_capacity(probed.len());
-    for (l, feats) in probed {
-        match deduped.last_mut() {
-            Some((prev, prev_feats)) if prev.id == l.id && !l.id.is_empty() => {
-                for (a, b) in prev_feats.iter_mut().zip(&feats) {
-                    *a = a.max(*b);
-                }
-            }
-            _ => deduped.push((l, feats)),
-        }
-    }
-
-    // Craftability filter, keyed by `explicit_count`, preserving the aligned
-    // feature vectors. Keep the bare Listings too for the BroadMarket fallback.
-    let deduped_listings: Vec<Listing> = deduped.iter().map(|(l, _)| l.clone()).collect();
-    let filtered: Vec<(Listing, Vec<f64>)> = deduped
-        .into_iter()
-        .filter(|(l, _)| l.explicit_count >= 1 && l.explicit_count <= max_explicit)
-        .collect();
-    let filtered_listings: Vec<Listing> = filtered.iter().map(|(l, _)| l.clone()).collect();
-    let rows: Vec<FeatureRow> = filtered
-        .iter()
-        .map(|(l, feats)| FeatureRow {
-            features: feats.clone(),
-            price_divine: l.price_divine,
-        })
-        .collect();
-
-    match model_price(&rows) {
-        Some(p) => {
-            let confidence = if p.sample >= 30 && p.kept_features * 2 >= n.max(1) {
-                Confidence::Medium
-            } else {
-                Confidence::Low
-            };
-            Ok(PriceEstimate {
-                low: p.p20,
-                typical: p.p50,
-                high: p.p80,
-                listing_count: filtered_listings.len(),
-                confidence,
-                modal_currency: modal_currency(&filtered_listings),
-                basis: EstimateBasis::Marginal,
-            })
-        }
-        // Too thin/collinear to model, or filtered pool empty (e.g. fetch omitted
-        // mods) → price the broad base population so we never resurface
-        // "No comparable listings found".
-        None => {
-            let fallback = if filtered_listings.is_empty() {
-                &deduped_listings
-            } else {
-                &filtered_listings
-            };
-            Ok(estimate_from(fallback, EstimateBasis::BroadMarket))
-        }
-    }
 }
 
 /// Hard cap on how many stats a single breakdown will probe, to bound the
@@ -246,6 +115,26 @@ pub async fn estimate<C: Comparables + ?Sized>(
         }
     };
     Ok(est)
+}
+
+/// Relax-and-read price-check: gather comparables (relaxing the query, weakest
+/// affix first, until `MIN_COMPARABLES` exist or `max_relax` is hit), then read
+/// p20/p50/p80 over the cheapest matches. No craftability filter — the query
+/// constraint plus the cheapest-first read define the comparable set. Never empty.
+pub async fn price_check<C: Comparables + ?Sized>(
+    c: &C,
+    query: &TradeQuery,
+    limit: usize,
+    max_relax: usize,
+    session: &TradeSession,
+) -> Result<PriceEstimate> {
+    let listings = c.comparables(query, limit, max_relax, session).await?;
+    let basis = if listings.len() >= MIN_COMPARABLES {
+        EstimateBasis::CraftTier
+    } else {
+        EstimateBasis::BroadMarket
+    };
+    Ok(estimate_from(&listings, basis))
 }
 
 /// Linear-interpolation percentile of an ascending-sorted slice. `p` in [0,1].
@@ -445,7 +334,6 @@ mod tests {
     };
     use crate::trade::session::TradeSession;
     use async_trait::async_trait;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
 
     fn listing(divine: f64) -> Listing {
@@ -944,173 +832,29 @@ mod tests {
         assert!(url2.ends_with("/poe2/A%2FB"), "{url2}");
     }
 
-    /// Listing with explicit stat ids and a specific id, for marginal estimate tests.
-    pub(super) fn listing_full(divine: f64, ec: usize, id: &str, ids: &[String]) -> Listing {
-        Listing {
-            price: Money {
-                amount: divine,
-                currency: Currency::Divine,
-            },
-            price_divine: divine,
-            explicit_count: ec,
-            id: id.to_string(),
-            explicit_stat_ids: ids.to_vec(),
-        }
-    }
-
-    struct CountingFake {
-        calls: AtomicUsize,
-    }
-    #[async_trait]
-    impl Comparables for CountingFake {
-        async fn comparables(
-            &self,
-            q: &TradeQuery,
-            _l: usize,
-            _max_relax: usize,
-            _s: &TradeSession,
-        ) -> anyhow::Result<Vec<Listing>> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            // base (no stats) → 30 cheap 1-affix items; base+stat → pricier items
-            // carrying that stat id, so the model can fit.
-            let mut v = Vec::new();
-            if q.stats.is_empty() {
-                for i in 0..30 {
-                    v.push(listing_full(
-                        2.0 + i as f64 * 0.01,
-                        2,
-                        &format!("base-{i}"),
-                        &[],
-                    ));
-                }
-            } else {
-                let id = q.stats[0].id.clone();
-                for i in 0..30 {
-                    v.push(listing_full(
-                        6.0 + i as f64 * 0.01,
-                        2,
-                        &format!("{id}-{i}"),
-                        std::slice::from_ref(&id),
-                    ));
-                }
-            }
-            Ok(v)
-        }
-    }
-
-    struct RecProgress {
-        hits: AtomicUsize,
-        last: std::sync::Mutex<usize>,
-    }
-    #[async_trait]
-    impl PriceProgress for RecProgress {
-        async fn value_path(&self, sub_queries: usize, _eta: std::time::Duration) {
-            self.hits.fetch_add(1, Ordering::SeqCst);
-            *self.last.lock().unwrap() = sub_queries;
-        }
-    }
-
     #[tokio::test]
-    async fn marginal_estimate_fits_and_reports_progress() {
-        let fake = CountingFake {
-            calls: AtomicUsize::new(0),
-        };
-        let prog = RecProgress {
-            hits: AtomicUsize::new(0),
-            last: std::sync::Mutex::new(0),
-        };
-        let q = two_stat_query(); // 2 stat filters (existing helper)
-        let est = marginal_estimate(&fake, &q, 100, &TradeSession::for_test(), 6, &prog)
+    async fn price_check_relaxes_then_reads_percentiles() {
+        // Fake returns few for the full query, enough once relaxed.
+        struct Relaxer;
+        #[async_trait]
+        impl Comparables for Relaxer {
+            async fn comparables(
+                &self,
+                _q: &TradeQuery,
+                _l: usize,
+                max_relax: usize,
+                _s: &TradeSession,
+            ) -> anyhow::Result<Vec<Listing>> {
+                // Mimic gather: with relaxation available, return a healthy set.
+                let n = if max_relax > 0 { 12 } else { 2 };
+                Ok((0..n).map(|i| listing(2.0 + i as f64)).collect())
+            }
+        }
+        let q = two_stat_query();
+        let est = price_check(&Relaxer, &q, 40, q.stats.len(), &TradeSession::for_test())
             .await
             .unwrap();
-        assert_eq!(est.basis, EstimateBasis::Marginal);
-        assert!(est.typical > 0.0);
-        // base + each of 2 stats = 3 sub-queries.
-        assert_eq!(*prog.last.lock().unwrap(), 3);
-        assert_eq!(prog.hits.load(Ordering::SeqCst), 1);
-        // Assert the sampler actually issued 3 sub-queries (1 base + 2 per-stat).
-        assert_eq!(fake.calls.load(Ordering::SeqCst), 3);
-    }
-
-    /// Fake whose per-mod sub-query returns listings that carry the searched mod
-    /// but do NOT list its id in `explicit_stat_ids` — exactly how pseudo
-    /// aggregates (`pseudo.*`) behave: the trade2 search filters on them, yet they
-    /// never surface as an explicit stat id on the returned items.
-    struct PseudoProvenanceFake;
-    #[async_trait]
-    impl Comparables for PseudoProvenanceFake {
-        async fn comparables(
-            &self,
-            q: &TradeQuery,
-            _l: usize,
-            _max_relax: usize,
-            _s: &TradeSession,
-        ) -> anyhow::Result<Vec<Listing>> {
-            let mut v = Vec::new();
-            if q.stats.is_empty() {
-                // base: cheap items, no explicit stat ids (the pseudo id, in
-                // particular, is absent — as it always is on real listings).
-                for i in 0..30 {
-                    v.push(listing_full(
-                        2.0 + i as f64 * 0.01,
-                        2,
-                        &format!("base-{i}"),
-                        &[],
-                    ));
-                }
-            } else {
-                // base + pseudo sub-query: pricier items that DO satisfy the pseudo
-                // filter, but whose `explicit_stat_ids` is empty — the old code
-                // would match the pseudo id against this list, find nothing, and
-                // drop the column as zero-variance. Provenance must rescue it.
-                for i in 0..30 {
-                    v.push(listing_full(
-                        6.0 + i as f64 * 0.01,
-                        2,
-                        &format!("pseudo-{i}"),
-                        &[],
-                    ));
-                }
-            }
-            Ok(v)
-        }
-    }
-
-    #[tokio::test]
-    async fn marginal_estimate_captures_pseudo_feature_via_provenance() {
-        let q = TradeQuery {
-            league: "Standard".into(),
-            category: None,
-            type_line: Some("Sapphire Ring".into()),
-            stats: vec![StatFilter {
-                id: "pseudo.pseudo_total_elemental_resistance".into(),
-                label: "+#% total Elemental Resistance".into(),
-                min: Some(120.0),
-                max: None,
-            }],
-            misc: MiscFilters::default(),
-            equipment: vec![],
-        };
-        let est = marginal_estimate(
-            &PseudoProvenanceFake,
-            &q,
-            100,
-            &TradeSession::for_test(),
-            6,
-            &NoProgress,
-        )
-        .await
-        .unwrap();
-        // The pseudo feature was forced present on the per-mod rows (provenance), so
-        // its column varies (base 0, pseudo 1) and is NOT dropped as zero-variance.
-        // The model therefore prices the resistance well above the ~2.0 base — proof
-        // the pseudo aggregate carried signal despite never appearing in any
-        // listing's `explicit_stat_ids`.
-        assert_eq!(est.basis, EstimateBasis::Marginal);
-        assert!(
-            est.typical > 4.0,
-            "pseudo marginal not captured: typical={}",
-            est.typical
-        );
+        assert_eq!(est.basis, EstimateBasis::CraftTier);
+        assert!(est.low <= est.typical && est.typical <= est.high);
     }
 }

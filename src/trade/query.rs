@@ -158,15 +158,6 @@ pub fn build_baseline(
     }
 }
 
-/// The same query with all stat filters removed (type + misc + equipment kept).
-/// Used by the marginal-contribution sampler to fetch the base population.
-pub fn base_query(q: &TradeQuery) -> TradeQuery {
-    TradeQuery {
-        stats: Vec::new(),
-        ..q.clone()
-    }
-}
-
 /// Serializes a `TradeQuery` to the trade2 search request body.
 ///
 /// Assumption (confirmed by the live smoke test in Task 7): trade2 expects
@@ -571,32 +562,6 @@ mod tests {
             .iter()
             .all(|s| !s.label.contains("increased Cast Speed") || s.label.contains("Spell")));
         // no implicit cast-speed filter
-    }
-
-    #[test]
-    fn base_query_clears_stats_keeps_type_and_misc() {
-        use crate::trade::model::{MiscFilters, StatFilter};
-        let q = TradeQuery {
-            league: "L".into(),
-            category: None,
-            type_line: Some("Chiming Staff".into()),
-            stats: vec![StatFilter {
-                id: "explicit.stat_1".into(),
-                label: "x".into(),
-                min: Some(1.0),
-                max: Some(2.0),
-            }],
-            misc: MiscFilters {
-                item_level_min: Some(80),
-                quality_min: None,
-                corrupted: Some(false),
-            },
-            equipment: vec![],
-        };
-        let b = base_query(&q);
-        assert!(b.stats.is_empty());
-        assert_eq!(b.type_line, q.type_line);
-        assert_eq!(b.misc.item_level_min, Some(80));
     }
 
     #[test]
