@@ -735,6 +735,7 @@ mod tests {
             stats: vec![],
             misc: MiscFilters::default(),
             equipment: vec![],
+            min_price_divine: None,
         };
         let session = crate::trade::session::TradeSession::for_test();
         let resp = client.search(&q, &session).await.unwrap();

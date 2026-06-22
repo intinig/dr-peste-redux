@@ -99,6 +99,9 @@ pub struct TradeQuery {
     pub stats: Vec<StatFilter>,
     pub misc: MiscFilters,
     pub equipment: Vec<EquipFilter>,
+    /// Minimum listing price in Divine for a price-banded search (harvest only;
+    /// `None` for normal pricing searches).
+    pub min_price_divine: Option<f64>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
