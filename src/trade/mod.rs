@@ -11,6 +11,7 @@ pub mod query;
 pub mod rates;
 pub mod session;
 pub mod stats;
+pub mod value;
 
 use anyhow::Result;
 
@@ -116,7 +117,10 @@ impl<C: Comparables> TradePricer<C> {
                 timestamp_unix,
                 league: league.to_string(),
                 base_type: l.base_type.clone().or_else(|| item.base_type.clone()),
-                category: item.item_class.clone(),
+                category: item
+                    .item_class
+                    .as_deref()
+                    .map(crate::trade::value::canonical_category),
                 mods: l.mods.clone(),
                 price_divine: l.price_divine,
                 source: Source::Paste,

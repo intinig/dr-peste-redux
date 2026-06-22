@@ -67,6 +67,10 @@ pub async fn harvest(
         .await
     {
         Ok(n) => {
+            crate::trade::value::rebuild_into(
+                &crate::observe::ObservationLog::new(&data.config.observation_log_path),
+                &data.value,
+            );
             reply
                 .edit(
                     ctx,

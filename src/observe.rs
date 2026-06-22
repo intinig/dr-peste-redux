@@ -46,6 +46,21 @@ impl ObservationLog {
         }
     }
 
+    /// Reads every well-formed observation from the log. Corrupt/partial lines
+    /// are skipped (best-effort); a missing file yields an empty Vec. Never
+    /// panics — the learning layer must degrade gracefully.
+    pub fn read_all(&self) -> Vec<Observation> {
+        let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        let body = match std::fs::read_to_string(&self.path) {
+            Ok(b) => b,
+            Err(_) => return Vec::new(),
+        };
+        body.lines()
+            .filter(|l| !l.trim().is_empty())
+            .filter_map(|l| serde_json::from_str::<Observation>(l).ok())
+            .collect()
+    }
+
     /// Appends one observation as a JSON line. Errors are returned, never
     /// panicked, so a logging failure can be downgraded to a warning by the caller.
     pub fn append(&self, obs: &Observation) -> Result<()> {
@@ -81,6 +96,34 @@ mod tests {
             price_divine: price,
             source: Source::Paste,
         }
+    }
+
+    #[test]
+    fn read_all_returns_observations_and_skips_corrupt_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("obs.jsonl");
+        let log = ObservationLog::new(&path);
+        log.append(&obs(10.0)).unwrap();
+        // A corrupt line between two good ones must be skipped, not fatal.
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"{ not json\n")
+            .unwrap();
+        log.append(&obs(20.0)).unwrap();
+
+        let all = log.read_all();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].price_divine, 10.0);
+        assert_eq!(all[1].price_divine, 20.0);
+    }
+
+    #[test]
+    fn read_all_on_missing_file_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = ObservationLog::new(dir.path().join("nope.jsonl"));
+        assert!(log.read_all().is_empty());
     }
 
     #[test]
