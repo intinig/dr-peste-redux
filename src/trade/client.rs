@@ -427,14 +427,16 @@ impl crate::trade::ablation::Comparables for TradeClient {
         query: &crate::trade::model::TradeQuery,
         limit: usize,
         max_relax: usize,
+        min_matches: usize,
         session: &TradeSession,
     ) -> anyhow::Result<Vec<crate::trade::model::Listing>> {
         use std::time::{Duration, Instant};
 
         let key = format!(
-            "{}|{}|{}",
+            "{}|{}|{}|{}",
             limit,
             max_relax,
+            min_matches,
             serde_json::to_string(query).unwrap_or_default()
         );
 
@@ -454,9 +456,15 @@ impl crate::trade::ablation::Comparables for TradeClient {
         }
 
         // --- await (no mutex held) ---
-        let result =
-            crate::trade::ablation::gather_comparables(self, query, limit, max_relax, session)
-                .await?;
+        let result = crate::trade::ablation::gather_comparables(
+            self,
+            query,
+            limit,
+            max_relax,
+            min_matches,
+            session,
+        )
+        .await?;
 
         // --- lock, prune expired, insert, unlock ---
         {

@@ -39,8 +39,11 @@ const PRICE_SAMPLE: usize = 40;
 const TOP_K: usize = 4;
 /// Min-price bands (Divine) for a harvest sweep. Each band fetches the cheapest
 /// HARVEST_SAMPLE listings at or above it, so together they span the price
-/// spectrum (cheapest-first search otherwise hides the expensive end).
-const PRICE_BANDS: [f64; 4] = [0.0, 5.0, 20.0, 50.0];
+/// spectrum (cheapest-first search otherwise hides the expensive end). The high
+/// bands (100/200/500) are what let the corpus + `/insights` see top-tier items —
+/// without them the corpus was blind above 50 div and learned nothing about what
+/// makes an item worth hundreds.
+const PRICE_BANDS: [f64; 7] = [0.0, 5.0, 20.0, 50.0, 100.0, 200.0, 500.0];
 /// Cheapest listings fetched per band.
 const HARVEST_SAMPLE: usize = 100;
 
@@ -238,6 +241,7 @@ mod tests {
             _q: &TradeQuery,
             _l: usize,
             _max_relax: usize,
+            _min_matches: usize,
             _session: &TradeSession,
         ) -> anyhow::Result<Vec<Listing>> {
             // 8 listings with distinct, stable ids so the exact∪relaxed union in
@@ -348,6 +352,7 @@ mod tests {
                 _q: &TradeQuery,
                 _l: usize,
                 _mr: usize,
+                _min_matches: usize,
                 _s: &TradeSession,
             ) -> anyhow::Result<Vec<Listing>> {
                 Ok((1..=12)
@@ -376,6 +381,7 @@ mod tests {
                 _q: &TradeQuery,
                 _l: usize,
                 _mr: usize,
+                _min_matches: usize,
                 _s: &TradeSession,
             ) -> anyhow::Result<Vec<Listing>> {
                 Ok((1..=5)
@@ -418,6 +424,7 @@ mod tests {
                 _q: &TradeQuery,
                 _l: usize,
                 _mr: usize,
+                _min_matches: usize,
                 _s: &TradeSession,
             ) -> anyhow::Result<Vec<Listing>> {
                 Ok(vec![])
@@ -508,6 +515,7 @@ mod tests {
                 _q: &TradeQuery,
                 _l: usize,
                 _mr: usize,
+                _min_matches: usize,
                 _s: &TradeSession,
             ) -> anyhow::Result<Vec<Listing>> {
                 Ok(vec![])

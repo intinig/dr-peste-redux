@@ -12,10 +12,12 @@ use crate::trade::model::{
 use crate::trade::session::TradeSession;
 
 /// High-level seam the pricer depends on. `TradeClient` implements it via
-/// `gather_comparables`; tests fake it directly. `max_relax` lets callers
-/// control whether query relaxation is used: pass 0 for exact sampling (routing
-/// probe, value-path sub-queries) or a positive value when broadening is wanted
-/// (e.g. breakdown baseline/per-drop probes).
+/// `gather_comparables`; tests fake it directly. `max_relax` lets callers control
+/// whether query relaxation is used (0 = exact sampling). `min_matches` is the
+/// relaxation target: relax only until at least this many comparables are found.
+/// Pass `1` for the tightest-non-empty read (price-check: the closest comparables,
+/// even if few) or `MIN_COMPARABLES` when a fuller sample is wanted before the
+/// craftability filter runs (breakdown/estimate).
 #[async_trait]
 pub trait Comparables {
     async fn comparables(
@@ -23,6 +25,7 @@ pub trait Comparables {
         query: &TradeQuery,
         limit: usize,
         max_relax: usize,
+        min_matches: usize,
         session: &TradeSession,
     ) -> Result<Vec<Listing>>;
 }
@@ -35,20 +38,24 @@ const PROBE_CEILING: usize = 16;
 const TRIM_BOTTOM_FRAC: f64 = 0.10;
 /// Only trim when at least this many comparables survive the craftability filter.
 const TRIM_MIN_N: usize = 8;
-/// Relax the query (drop a filter) only while the constrained search yields fewer
-/// comparables than this. Decoupled from the fetch cap (COMPARABLE_SAMPLE): a query
-/// returning, say, 60 exact matches must NOT be relaxed just because it's < the cap.
+/// Default relaxation target for the broad/breakdown path: relax until at least
+/// this many comparables are found, so the craftability filter has a real sample
+/// to work with. The price-check path overrides this with `1` (tightest non-empty).
 pub(crate) const MIN_COMPARABLES: usize = 10;
 
-/// Searches + fetches up to `limit` cheapest listings. If fewer than `MIN_COMPARABLES`
-/// are found, relaxes the query (drops the last stat filter, then the last
-/// equipment band) and retries, up to `max_relax` times. Returns whatever it
-/// has (possibly empty).
+/// Searches + fetches up to `limit` cheapest listings, relaxing the query (drops
+/// the last stat filter, then the last equipment band, up to `max_relax` times)
+/// until it has at least `min_matches` comparables. With `min_matches == 1` this is
+/// the tightest query that returns *any* match. Because `build_baseline` orders the
+/// strongest mods first and relaxation pops from the end, the value-defining mods
+/// survive longest — so the returned set is the closest comparables, never an
+/// over-broadened cheap-market sample. Returns whatever it has (possibly empty).
 pub async fn gather_comparables<A: TradeApi + ?Sized>(
     api: &A,
     query: &TradeQuery,
     limit: usize,
     max_relax: usize,
+    min_matches: usize,
     session: &TradeSession,
 ) -> Result<Vec<Listing>> {
     let mut q = query.clone();
@@ -63,7 +70,7 @@ pub async fn gather_comparables<A: TradeApi + ?Sized>(
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         let exhausted = q.stats.is_empty() && q.equipment.is_empty();
-        if listings.len() >= MIN_COMPARABLES || relaxations >= max_relax || exhausted {
+        if listings.len() >= min_matches || relaxations >= max_relax || exhausted {
             return Ok(listings);
         }
         // Relax the loosest constraint: stat filters first, then equipment bands.
@@ -102,7 +109,12 @@ pub async fn estimate<C: Comparables + ?Sized>(
     session: &TradeSession,
     max_explicit: Option<usize>,
 ) -> Result<PriceEstimate> {
-    let listings = c.comparables(query, limit, max_relax, session).await?;
+    // Relax until a real sample (MIN_COMPARABLES) is found before the craftability
+    // filter runs, so a tight query returning only filled/unknown listings doesn't
+    // collapse straight to BroadMarket.
+    let listings = c
+        .comparables(query, limit, max_relax, MIN_COMPARABLES, session)
+        .await?;
     let est = match max_explicit {
         None => estimate_from(&listings, EstimateBasis::AffixesOnly),
         Some(max) => {
@@ -121,18 +133,21 @@ pub async fn estimate<C: Comparables + ?Sized>(
 /// No craftability filter — the query constraint plus the cheapest-first read
 /// define the comparable set.
 ///
-/// Exact-first: the full constraint is searched with no relaxation; if it yields
-/// `≥ MIN_COMPARABLES` it is a precise comparable set (`CraftTier`, confidence by
-/// count). Only when the exact query is too thin do we relax (weakest affix
-/// first, up to `max_relax`) and price that broader set as `BroadMarket` (low
-/// confidence) — so a fully-relaxed bare-base fallback is never presented as a
-/// precise match. The estimate may be empty (`listing_count == 0`) when a base
-/// has no live listings at all; callers surface that as a thin-market result.
+/// Exact-first: the full constraint is searched with no relaxation.
+/// - non-empty → the item's genuine comparables; priced as `CraftTier`, confidence
+///   scaling by count (`Confidence::from_count`). A handful of matches is low
+///   confidence but still the right set — for a top-tier item the few matching
+///   listings ARE the value, and dropping them for a broadened cheap-market sample
+///   is exactly what under-priced rare items.
+/// - empty → relax, requesting `min_matches = 1` so the `Comparables` impl returns
+///   the tightest query that matches anything (for `TradeClient`/`gather_comparables`
+///   that means dropping the weakest affixes first, keeping the strongest mods
+///   longest). That broader set is priced as `BroadMarket` (low confidence). The
+///   estimate may still be empty (`listing_count == 0`) when the base has no live
+///   listings at all.
 ///
-/// Returns `(estimate, observations)`. `observations` is the set the caller logs
-/// to the corpus: the priced-over comparables, plus — on the thin/relaxed path —
-/// the rare exact full-constraint matches (unioned by listing id), since those
-/// are the most informative examples even though the estimate is the broad set.
+/// Returns `(estimate, observations)`. `observations` is the priced-over comparable
+/// set, which the caller logs to the corpus.
 pub async fn price_check<C: Comparables + ?Sized>(
     c: &C,
     query: &TradeQuery,
@@ -140,32 +155,21 @@ pub async fn price_check<C: Comparables + ?Sized>(
     max_relax: usize,
     session: &TradeSession,
 ) -> Result<(PriceEstimate, Vec<Listing>)> {
-    // Exact (no relaxation): a full-constraint match with enough comparables is
-    // precise and deserves count-based confidence.
-    let exact = c.comparables(query, limit, 0, session).await?;
-    if exact.len() >= MIN_COMPARABLES {
+    // Exact (no relaxation): the full-constraint matches are the item's true
+    // comparables. Price them whenever there is at least one — a thin set is low
+    // confidence, but it is the right set. Only fall back to the relaxed broad
+    // market when the full constraint matches nothing at all.
+    let exact = c.comparables(query, limit, 0, 1, session).await?;
+    if !exact.is_empty() {
         let est = estimate_from(&exact, EstimateBasis::CraftTier);
         return Ok((est, exact));
     }
-    // Too thin at full constraint → relax and price the broader set, but keep it
-    // on the low-confidence broad-market path regardless of how many it returns.
-    let relaxed = c.comparables(query, limit, max_relax, session).await?;
+    // Full constraint matched nothing → relax to the tightest non-empty set
+    // (`min_matches = 1`; strongest mods kept longest) and price that broader
+    // sample, low-confidence.
+    let relaxed = c.comparables(query, limit, max_relax, 1, session).await?;
     let est = estimate_from(&relaxed, EstimateBasis::BroadMarket);
-    // The estimate is the relaxed (broad) set, but the corpus also keeps the thin
-    // exact matches — the most informative observations, often priced out of the
-    // relaxed cheapest-N. Union by listing id (empty ids can't dedup → kept).
-    let mut to_log = relaxed;
-    let seen: std::collections::HashSet<String> = to_log
-        .iter()
-        .filter(|l| !l.id.is_empty())
-        .map(|l| l.id.clone())
-        .collect();
-    for l in exact {
-        if l.id.is_empty() || !seen.contains(&l.id) {
-            to_log.push(l);
-        }
-    }
-    Ok((est, to_log))
+    Ok((est, relaxed))
 }
 
 /// Linear-interpolation percentile of an ascending-sorted slice. `p` in [0,1].
@@ -472,45 +476,98 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn relaxes_until_min_listings_reached() {
+    async fn does_not_relax_when_full_query_matches() {
+        // The full 3-stat query already returns a match (FakeApi: 1 listing) → gather
+        // must NOT relax. Relaxing would broaden to a cheaper, less-comparable market
+        // — the bug that under-priced rare items. It returns the tightest set as-is.
         let api = FakeApi {
             seen: Mutex::new(vec![]),
         };
-        // 3 stats → 1 listing (< k=5). Must relax (drop a stat) until ≥ 5.
-        let got = gather_comparables(&api, &q_with(3), 5, 3, &TradeSession::for_test())
+        let got = gather_comparables(&api, &q_with(3), 5, 3, 1, &TradeSession::for_test())
             .await
             .unwrap();
-        assert!(got.len() >= 5);
+        assert_eq!(got.len(), 1, "the un-relaxed 3-stat query's single match");
+        assert_eq!(
+            api.seen.lock().unwrap().len(),
+            1,
+            "searched once; no relaxation"
+        );
     }
 
     #[tokio::test]
-    async fn relaxes_equipment_when_stats_exhausted() {
-        // No stat filters, only equipment bands: relaxation must drop equipment
-        // (otherwise a too-tight defence band returns a thin result).
+    async fn relaxes_past_empty_until_first_match() {
+        // The tight query matches nothing; relaxation drops the weakest filters until
+        // the first query that matches, and STOPS there (does not over-relax to the
+        // bare base). `EmptyUntilOne` returns nothing while >1 stat remains.
+        struct EmptyUntilOne {
+            seen: Mutex<Vec<TradeQuery>>,
+        }
+        #[async_trait]
+        impl TradeApi for EmptyUntilOne {
+            async fn search(
+                &self,
+                q: &TradeQuery,
+                _s: &TradeSession,
+            ) -> anyhow::Result<SearchResponse> {
+                self.seen.lock().unwrap().push(q.clone());
+                let n = if q.stats.len() > 1 { 0 } else { 3 };
+                Ok(SearchResponse {
+                    id: "qid".into(),
+                    total: n as u64,
+                    hashes: (0..n).map(|i| format!("h{i}")).collect(),
+                })
+            }
+            async fn fetch(
+                &self,
+                _id: &str,
+                hashes: &[String],
+                _s: &TradeSession,
+            ) -> anyhow::Result<Vec<Listing>> {
+                Ok(hashes.iter().map(|_| listing(10.0)).collect())
+            }
+        }
+        let api = EmptyUntilOne {
+            seen: Mutex::new(vec![]),
+        };
+        // 3 stats (empty) → 2 stats (empty) → 1 stat (3 matches) → stop.
+        let got = gather_comparables(&api, &q_with(3), 5, 5, 1, &TradeSession::for_test())
+            .await
+            .unwrap();
+        assert_eq!(got.len(), 3);
+        assert_eq!(
+            api.seen.lock().unwrap().len(),
+            3,
+            "relaxed twice to the first non-empty query, then stopped"
+        );
+    }
+
+    #[tokio::test]
+    async fn breakdown_path_relaxes_past_thin_result_to_reach_min_matches() {
+        // With min_matches > 1 (the breakdown/estimate path), a thin non-empty
+        // result is NOT enough: gather keeps relaxing until it has a real sample,
+        // so the craftability filter downstream has something to work with. FakeApi
+        // returns 1 listing at 3 stats, growing as stats drop.
         let api = FakeApi {
             seen: Mutex::new(vec![]),
         };
-        let q = TradeQuery {
-            league: "Standard".into(),
-            category: None,
-            type_line: Some("Sandsworn Sandals".into()),
-            stats: vec![],
-            misc: MiscFilters::default(),
-            equipment: (0..3)
-                .map(|i| crate::trade::model::EquipFilter {
-                    key: format!("e{i}"),
-                    min: Some(50.0),
-                    max: None,
-                })
-                .collect(),
-            min_price_divine: None,
-        };
-        let got = gather_comparables(&api, &q, 5, 3, &TradeSession::for_test())
-            .await
-            .unwrap();
+        let got = gather_comparables(
+            &api,
+            &q_with(3),
+            100,
+            3,
+            MIN_COMPARABLES,
+            &TradeSession::for_test(),
+        )
+        .await
+        .unwrap();
         assert!(
-            got.len() >= 5,
-            "should relax equipment bands to reach the limit"
+            got.len() >= MIN_COMPARABLES,
+            "relaxed to reach a real sample, got {}",
+            got.len()
+        );
+        assert!(
+            api.seen.lock().unwrap().len() > 1,
+            "relaxed past the thin first result"
         );
     }
 
@@ -552,9 +609,16 @@ mod tests {
         let api = FatApi {
             seen: Mutex::new(vec![]),
         };
-        let got = gather_comparables(&api, &q_with(3), 100, 3, &TradeSession::for_test())
-            .await
-            .unwrap();
+        let got = gather_comparables(
+            &api,
+            &q_with(3),
+            100,
+            3,
+            MIN_COMPARABLES,
+            &TradeSession::for_test(),
+        )
+        .await
+        .unwrap();
         assert_eq!(got.len(), 12);
         assert_eq!(
             api.seen.lock().unwrap().len(),
@@ -574,6 +638,7 @@ mod tests {
             q: &TradeQuery,
             _limit: usize,
             _max_relax: usize,
+            _min_matches: usize,
             _session: &TradeSession,
         ) -> anyhow::Result<Vec<Listing>> {
             // base 5; +10 if "spell" present; +2 if "crit" present; +6 extra if BOTH (synergy)
@@ -649,6 +714,7 @@ mod tests {
             _q: &TradeQuery,
             _limit: usize,
             _max_relax: usize,
+            _min_matches: usize,
             _session: &TradeSession,
         ) -> anyhow::Result<Vec<Listing>> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -711,6 +777,7 @@ mod tests {
             _q: &TradeQuery,
             _limit: usize,
             _max_relax: usize,
+            _min_matches: usize,
             _session: &TradeSession,
         ) -> anyhow::Result<Vec<Listing>> {
             Ok(self.0.clone())
@@ -871,9 +938,9 @@ mod tests {
 
     #[tokio::test]
     async fn price_check_relaxed_result_is_broad_market_low_confidence() {
-        // Exact (max_relax=0) is thin (2); relaxing yields a healthy set (12).
-        // The relaxed result must NOT be presented as a precise CraftTier match —
-        // it is BroadMarket with Low confidence (the fully-relaxed fallback).
+        // Exact (max_relax=0) matches nothing; relaxing yields a set (12). The
+        // relaxed result must NOT be presented as a precise CraftTier match — it is
+        // BroadMarket with Low confidence (the fallback when the full query is empty).
         struct Relaxer;
         #[async_trait]
         impl Comparables for Relaxer {
@@ -882,9 +949,10 @@ mod tests {
                 _q: &TradeQuery,
                 _l: usize,
                 max_relax: usize,
+                _min_matches: usize,
                 _s: &TradeSession,
             ) -> anyhow::Result<Vec<Listing>> {
-                let n = if max_relax > 0 { 12 } else { 2 };
+                let n = if max_relax > 0 { 12 } else { 0 };
                 Ok((0..n).map(|i| listing(2.0 + i as f64)).collect())
             }
         }
@@ -910,6 +978,7 @@ mod tests {
                 _q: &TradeQuery,
                 _l: usize,
                 _max_relax: usize,
+                _min_matches: usize,
                 _s: &TradeSession,
             ) -> anyhow::Result<Vec<Listing>> {
                 Ok((0..12).map(|i| listing(2.0 + i as f64)).collect())
@@ -924,10 +993,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn price_check_logs_union_of_exact_and_relaxed() {
-        // Exact (max_relax=0) returns 2 thin matches; relaxed returns 12 broader
-        // ones — all with distinct ids. The logged set must be the union (14): the
-        // estimate is the relaxed set, but the rare exact matches are kept too.
+    async fn price_check_prices_thin_exact_not_relaxed_floor() {
+        // Exact (max_relax=0) returns 2 expensive matches (50, 51 div); the relaxed
+        // path would return a cheap floor. The estimate must be the exact matches
+        // (CraftTier, ~50 div) — NOT the relaxed floor — and only those are logged.
         fn lst(divine: f64, id: &str) -> Listing {
             Listing {
                 price: Money {
@@ -949,6 +1018,7 @@ mod tests {
                 _q: &TradeQuery,
                 _l: usize,
                 max_relax: usize,
+                _min_matches: usize,
                 _s: &TradeSession,
             ) -> anyhow::Result<Vec<Listing>> {
                 if max_relax == 0 {
@@ -967,8 +1037,53 @@ mod tests {
             price_check(&ExactThin, &q, 40, q.stats.len(), &TradeSession::for_test())
                 .await
                 .unwrap();
-        assert_eq!(est.basis, EstimateBasis::BroadMarket); // priced on the relaxed set
-        assert_eq!(to_log.len(), 14); // 12 relaxed + 2 exact, distinct ids → no dedup
-        assert!(to_log.iter().any(|l| l.id == "exact-0"));
+        assert_eq!(est.basis, EstimateBasis::CraftTier); // priced on the exact set
+        assert!(est.typical >= 50.0, "got typical={}", est.typical);
+        assert_eq!(to_log.len(), 2); // only the exact matches logged
+        assert!(to_log.iter().all(|l| l.id.starts_with("exact")));
+    }
+
+    #[tokio::test]
+    async fn price_check_thin_expensive_exact_is_priced_not_floored() {
+        // Regression for the top-tier-staff bug: a rare item whose full constraint
+        // matches a FEW expensive listings must be priced off THOSE matches, not
+        // off a broadened cheap-market set. Exact (max_relax=0) → 3 expensive
+        // comparables; relaxed → a cheap floor. The estimate must reflect the
+        // expensive exact matches.
+        struct ThinExpensive;
+        #[async_trait]
+        impl Comparables for ThinExpensive {
+            async fn comparables(
+                &self,
+                _q: &TradeQuery,
+                _l: usize,
+                max_relax: usize,
+                _min_matches: usize,
+                _s: &TradeSession,
+            ) -> anyhow::Result<Vec<Listing>> {
+                if max_relax == 0 {
+                    Ok(vec![listing(80.0), listing(150.0), listing(210.0)])
+                } else {
+                    Ok((0..40).map(|_| listing(0.1)).collect())
+                }
+            }
+        }
+        let q = two_stat_query();
+        let (est, to_log) = price_check(
+            &ThinExpensive,
+            &q,
+            40,
+            q.stats.len(),
+            &TradeSession::for_test(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            est.typical >= 50.0,
+            "thin expensive exact matches must drive the price, got typical={}",
+            est.typical
+        );
+        assert_eq!(est.basis, EstimateBasis::CraftTier); // the exact constrained set
+        assert_eq!(to_log.len(), 3); // logged the expensive comparables, not the floor
     }
 }
