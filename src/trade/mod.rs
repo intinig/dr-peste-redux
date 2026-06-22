@@ -241,6 +241,7 @@ mod tests {
             _q: &TradeQuery,
             _l: usize,
             _max_relax: usize,
+            _min_matches: usize,
             _session: &TradeSession,
         ) -> anyhow::Result<Vec<Listing>> {
             // 8 listings with distinct, stable ids so the exact∪relaxed union in
@@ -351,6 +352,7 @@ mod tests {
                 _q: &TradeQuery,
                 _l: usize,
                 _mr: usize,
+                _min_matches: usize,
                 _s: &TradeSession,
             ) -> anyhow::Result<Vec<Listing>> {
                 Ok((1..=12)
@@ -379,6 +381,7 @@ mod tests {
                 _q: &TradeQuery,
                 _l: usize,
                 _mr: usize,
+                _min_matches: usize,
                 _s: &TradeSession,
             ) -> anyhow::Result<Vec<Listing>> {
                 Ok((1..=5)
@@ -421,6 +424,7 @@ mod tests {
                 _q: &TradeQuery,
                 _l: usize,
                 _mr: usize,
+                _min_matches: usize,
                 _s: &TradeSession,
             ) -> anyhow::Result<Vec<Listing>> {
                 Ok(vec![])
@@ -511,6 +515,7 @@ mod tests {
                 _q: &TradeQuery,
                 _l: usize,
                 _mr: usize,
+                _min_matches: usize,
                 _s: &TradeSession,
             ) -> anyhow::Result<Vec<Listing>> {
                 Ok(vec![])
