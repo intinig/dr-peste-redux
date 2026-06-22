@@ -273,6 +273,10 @@ impl TradeClient {
                         let item = entry.get("item");
                         let explicit_count = item.map(affix_count).unwrap_or(0);
                         let mods = item.map(listing_mods).unwrap_or_default();
+                        let base_type = item
+                            .and_then(|it| it.get("baseType"))
+                            .and_then(|b| b.as_str())
+                            .map(String::from);
                         let id = entry
                             .get("id")
                             .and_then(|v| v.as_str())
@@ -287,6 +291,7 @@ impl TradeClient {
                             price_divine,
                             explicit_count,
                             id,
+                            base_type,
                             mods,
                         })
                     })
@@ -332,6 +337,19 @@ impl TradeClient {
             })
             .await
             .context("trade2 data/stats failed")?
+            .text()
+            .await?)
+    }
+
+    /// Fetches the raw `data/filters` taxonomy JSON.
+    pub async fn fetch_filters_raw(&self) -> Result<String> {
+        let url = format!("{TRADE_BASE}/data/filters");
+        Ok(self
+            .send_with_retry(&self.default_limiter, Endpoint::Fetch, || {
+                self.http.get(&url)
+            })
+            .await
+            .context("trade2 data/filters failed")?
             .text()
             .await?)
     }
@@ -685,6 +703,21 @@ mod tests {
     }
 
     #[test]
+    fn parse_fetch_extracts_base_type() {
+        let client = test_client();
+        let v = serde_json::json!({
+            "result": [{
+                "id": "abc",
+                "listing": { "price": { "amount": 1.0, "currency": "divine" } },
+                "item": { "baseType": "Chiming Staff", "explicitMods": [] }
+            }]
+        });
+        let ls = client.parse_fetch(&v);
+        assert_eq!(ls.len(), 1);
+        assert_eq!(ls[0].base_type.as_deref(), Some("Chiming Staff"));
+    }
+
+    #[test]
     fn fetch_batches_caps_at_ten_ids() {
         let hashes: Vec<String> = (0..25).map(|i| format!("h{i}")).collect();
         let batches = fetch_batches(&hashes);
@@ -715,6 +748,7 @@ mod tests {
             stats: vec![],
             misc: MiscFilters::default(),
             equipment: vec![],
+            min_price_divine: None,
         };
         let session = crate::trade::session::TradeSession::for_test();
         let resp = client.search(&q, &session).await.unwrap();

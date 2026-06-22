@@ -155,6 +155,7 @@ pub fn build_baseline(
             corrupted: Some(item.corrupted),
         },
         equipment,
+        min_price_divine: None,
     }
 }
 
@@ -217,6 +218,10 @@ pub fn to_payload(q: &TradeQuery) -> Value {
     });
     if let Some(t) = &q.type_line {
         query["type"] = json!(t);
+    }
+    if let Some(min) = q.min_price_divine {
+        query["filters"]["trade_filters"] =
+            json!({ "filters": { "price": { "min": min, "option": "divine" } } });
     }
 
     json!({ "query": query, "sort": { "price": "asc" } })
@@ -562,6 +567,43 @@ mod tests {
             .iter()
             .all(|s| !s.label.contains("increased Cast Speed") || s.label.contains("Spell")));
         // no implicit cast-speed filter
+    }
+
+    #[test]
+    fn to_payload_emits_min_price_band() {
+        let q = TradeQuery {
+            league: "L".into(),
+            category: Some("weapon.staff".into()),
+            type_line: None,
+            stats: vec![],
+            misc: MiscFilters::default(),
+            equipment: vec![],
+            min_price_divine: Some(20.0),
+        };
+        let p = to_payload(&q);
+        assert_eq!(
+            p["query"]["filters"]["trade_filters"]["filters"]["price"]["min"],
+            20.0
+        );
+        assert_eq!(
+            p["query"]["filters"]["trade_filters"]["filters"]["price"]["option"],
+            "divine"
+        );
+    }
+
+    #[test]
+    fn to_payload_omits_price_when_none() {
+        let q = TradeQuery {
+            league: "L".into(),
+            category: None,
+            type_line: Some("Chiming Staff".into()),
+            stats: vec![],
+            misc: MiscFilters::default(),
+            equipment: vec![],
+            min_price_divine: None,
+        };
+        let p = to_payload(&q);
+        assert!(p["query"]["filters"].get("trade_filters").is_none());
     }
 
     #[test]

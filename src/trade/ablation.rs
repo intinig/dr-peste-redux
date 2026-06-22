@@ -376,6 +376,7 @@ mod tests {
             price_divine: divine,
             explicit_count: 0,
             id: String::new(),
+            base_type: None,
             mods: vec![],
         }
     }
@@ -389,6 +390,7 @@ mod tests {
             price_divine: divine,
             explicit_count,
             id: String::new(),
+            base_type: None,
             mods: vec![],
         }
     }
@@ -465,6 +467,7 @@ mod tests {
                 .collect(),
             misc: MiscFilters::default(),
             equipment: vec![],
+            min_price_divine: None,
         }
     }
 
@@ -500,6 +503,7 @@ mod tests {
                     max: None,
                 })
                 .collect(),
+            min_price_divine: None,
         };
         let got = gather_comparables(&api, &q, 5, 3, &TradeSession::for_test())
             .await
@@ -610,6 +614,7 @@ mod tests {
             ],
             misc: MiscFilters::default(),
             equipment: vec![],
+            min_price_divine: None,
         }
     }
 
@@ -844,6 +849,7 @@ mod tests {
             stats: vec![],
             misc: MiscFilters::default(),
             equipment: vec![],
+            min_price_divine: None,
         };
         let url = trade_url(&q);
         assert!(
@@ -931,6 +937,7 @@ mod tests {
                 price_divine: divine,
                 explicit_count: 1,
                 id: id.to_string(),
+                base_type: None,
                 mods: vec![],
             }
         }

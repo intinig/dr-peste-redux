@@ -1,5 +1,6 @@
 pub mod embeds;
 pub mod farm;
+pub mod harvest;
 pub mod help;
 pub mod logout;
 pub mod paste;
@@ -20,6 +21,7 @@ pub struct Data {
     pub pricer: Arc<TradePricer<TradeClient>>,
     pub rates: Arc<RwLock<crate::trade::rates::RateTable>>,
     pub sessions: Arc<crate::trade::session::MemberSessions>,
+    pub categories: crate::trade::categories::CategoryCatalog,
 }
 
 pub type Error = anyhow::Error;
