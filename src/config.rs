@@ -9,6 +9,7 @@ pub struct Config {
     pub poesessid: Option<String>,
     pub proxy: Option<crate::trade::session::ProxyConfig>,
     pub session_ttl_mins: u64,
+    pub observation_log_path: String,
 }
 
 impl Config {
@@ -70,6 +71,10 @@ impl Config {
             _ => None,
         };
 
+        let observation_log_path = get("OBSERVATION_LOG_PATH")
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "observations.jsonl".to_string());
+
         Ok(Self {
             discord_token,
             guild_id,
@@ -78,6 +83,7 @@ impl Config {
             poesessid,
             proxy,
             session_ttl_mins,
+            observation_log_path,
         })
     }
 }
@@ -210,5 +216,28 @@ mod tests {
         })
         .unwrap();
         assert_eq!(cfg.poesessid.as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn observation_log_path_defaults_to_observations_jsonl() {
+        let cfg = Config::from_lookup(|k| match k {
+            "DISCORD_TOKEN" => Some("t".into()),
+            "GUILD_ID" => Some("1".into()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(cfg.observation_log_path, "observations.jsonl");
+    }
+
+    #[test]
+    fn observation_log_path_can_be_overridden() {
+        let cfg = Config::from_lookup(|k| match k {
+            "DISCORD_TOKEN" => Some("t".into()),
+            "GUILD_ID" => Some("1".into()),
+            "OBSERVATION_LOG_PATH" => Some("/data/observations.jsonl".into()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(cfg.observation_log_path, "/data/observations.jsonl");
     }
 }

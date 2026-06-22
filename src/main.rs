@@ -1,8 +1,8 @@
 mod config;
 mod discord;
 mod itemtext;
+mod observe;
 mod poeninja;
-mod pricelog;
 mod store;
 mod trade;
 
@@ -13,8 +13,8 @@ use poise::serenity_prelude as serenity;
 use tracing_subscriber::EnvFilter;
 
 use discord::Data;
+use observe::ObservationLog;
 use poeninja::NinjaClient;
-use pricelog::ProbeLog;
 use store::{PriceStore, Snapshot};
 use trade::client::TradeClient;
 use trade::pseudo::PseudoMap;
@@ -88,7 +88,7 @@ async fn main() -> Result<()> {
         trade_client,
         PseudoMap::load(),
         catalog,
-        ProbeLog::new("probes.jsonl"),
+        ObservationLog::new(&config.observation_log_path),
     ));
     let sessions = std::sync::Arc::new(crate::trade::session::MemberSessions::new(
         config.proxy.clone(),

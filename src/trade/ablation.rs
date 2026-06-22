@@ -128,23 +128,28 @@ pub async fn estimate<C: Comparables + ?Sized>(
 /// confidence) — so a fully-relaxed bare-base fallback is never presented as a
 /// precise match. The estimate may be empty (`listing_count == 0`) when a base
 /// has no live listings at all; callers surface that as a thin-market result.
+///
+/// Returns `(estimate, listings)` where `listings` is the comparable set the
+/// estimate was computed over — the caller can log these as observations.
 pub async fn price_check<C: Comparables + ?Sized>(
     c: &C,
     query: &TradeQuery,
     limit: usize,
     max_relax: usize,
     session: &TradeSession,
-) -> Result<PriceEstimate> {
+) -> Result<(PriceEstimate, Vec<Listing>)> {
     // Exact (no relaxation): a full-constraint match with enough comparables is
     // precise and deserves count-based confidence.
     let exact = c.comparables(query, limit, 0, session).await?;
     if exact.len() >= MIN_COMPARABLES {
-        return Ok(estimate_from(&exact, EstimateBasis::CraftTier));
+        let est = estimate_from(&exact, EstimateBasis::CraftTier);
+        return Ok((est, exact));
     }
     // Too thin at full constraint → relax and price the broader set, but keep it
     // on the low-confidence broad-market path regardless of how many it returns.
     let relaxed = c.comparables(query, limit, max_relax, session).await?;
-    Ok(estimate_from(&relaxed, EstimateBasis::BroadMarket))
+    let est = estimate_from(&relaxed, EstimateBasis::BroadMarket);
+    Ok((est, relaxed))
 }
 
 /// Linear-interpolation percentile of an ascending-sorted slice. `p` in [0,1].
@@ -862,9 +867,10 @@ mod tests {
             }
         }
         let q = two_stat_query();
-        let est = price_check(&Relaxer, &q, 40, q.stats.len(), &TradeSession::for_test())
-            .await
-            .unwrap();
+        let (est, _listings) =
+            price_check(&Relaxer, &q, 40, q.stats.len(), &TradeSession::for_test())
+                .await
+                .unwrap();
         assert_eq!(est.basis, EstimateBasis::BroadMarket);
         assert_eq!(est.confidence, Confidence::Low);
         assert!(est.low <= est.typical && est.typical <= est.high);
@@ -888,9 +894,10 @@ mod tests {
             }
         }
         let q = two_stat_query();
-        let est = price_check(&Plenty, &q, 40, q.stats.len(), &TradeSession::for_test())
-            .await
-            .unwrap();
+        let (est, _listings) =
+            price_check(&Plenty, &q, 40, q.stats.len(), &TradeSession::for_test())
+                .await
+                .unwrap();
         assert_eq!(est.basis, EstimateBasis::CraftTier);
     }
 }

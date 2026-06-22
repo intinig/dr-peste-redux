@@ -179,14 +179,6 @@ pub struct Breakdown {
     pub trade_url: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
-pub struct Probe {
-    pub query: TradeQuery,
-    pub listing_count: usize,
-    pub typical_divine: f64,
-    pub timestamp_unix: u64,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
