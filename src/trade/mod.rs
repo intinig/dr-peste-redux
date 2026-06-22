@@ -11,6 +11,7 @@ pub mod query;
 pub mod rates;
 pub mod session;
 pub mod stats;
+pub mod value;
 
 use anyhow::Result;
 
@@ -48,20 +49,27 @@ pub struct TradePricer<C: Comparables> {
     pseudo: PseudoMap,
     catalog: StatCatalog,
     log: ObservationLog,
+    value: std::sync::Arc<std::sync::RwLock<crate::trade::value::ValueModel>>,
 }
 
 impl<C: Comparables> TradePricer<C> {
+    /// Read access to the stat catalog (for /insights label resolution).
+    pub fn catalog(&self) -> &StatCatalog {
+        &self.catalog
+    }
     pub fn new(
         comparables: C,
         pseudo: PseudoMap,
         catalog: StatCatalog,
         log: ObservationLog,
+        value: std::sync::Arc<std::sync::RwLock<crate::trade::value::ValueModel>>,
     ) -> Self {
         TradePricer {
             comparables,
             pseudo,
             catalog,
             log,
+            value,
         }
     }
 
@@ -71,7 +79,10 @@ impl<C: Comparables> TradePricer<C> {
         league: &str,
         session: &TradeSession,
     ) -> Result<PriceEstimate> {
-        let query = build_baseline(item, &self.pseudo, &self.catalog, league);
+        let query = {
+            let model = self.value.read().unwrap_or_else(|e| e.into_inner());
+            build_baseline(item, &self.pseudo, &self.catalog, &model, league)
+        };
         // Relax up to the number of stat + equipment filters so the query can
         // broaden all the way to the bare base if needed (gather_comparables drops
         // stat filters first, then equipment bands); build_baseline ordered the
@@ -90,7 +101,10 @@ impl<C: Comparables> TradePricer<C> {
         league: &str,
         session: &TradeSession,
     ) -> Result<Breakdown> {
-        let query = build_baseline(item, &self.pseudo, &self.catalog, league);
+        let query = {
+            let model = self.value.read().unwrap_or_else(|e| e.into_inner());
+            build_baseline(item, &self.pseudo, &self.catalog, &model, league)
+        };
         let max_explicit = item.craftability().map(|c| c.explicit_count as usize);
         let bd = crate::trade::ablation::breakdown(
             &self.comparables,
@@ -116,7 +130,10 @@ impl<C: Comparables> TradePricer<C> {
                 timestamp_unix,
                 league: league.to_string(),
                 base_type: l.base_type.clone().or_else(|| item.base_type.clone()),
-                category: item.item_class.clone(),
+                category: item
+                    .item_class
+                    .as_deref()
+                    .map(crate::trade::value::canonical_category),
                 mods: l.mods.clone(),
                 price_divine: l.price_divine,
                 source: Source::Paste,
@@ -289,6 +306,9 @@ mod tests {
             crate::trade::pseudo::PseudoMap::load(),
             crate::trade::stats::StatCatalog::default(),
             crate::observe::ObservationLog::new(dir.path().join("obs.jsonl")),
+            std::sync::Arc::new(std::sync::RwLock::new(
+                crate::trade::value::ValueModel::default(),
+            )),
         );
         (pricer, dir)
     }
@@ -303,6 +323,9 @@ mod tests {
             crate::trade::pseudo::PseudoMap::load(),
             crate::trade::stats::StatCatalog::default(),
             log,
+            std::sync::Arc::new(std::sync::RwLock::new(
+                crate::trade::value::ValueModel::default(),
+            )),
         );
         let est = pricer
             .price(&ring(), "Standard", &TradeSession::for_test())
@@ -367,6 +390,9 @@ mod tests {
             crate::trade::pseudo::PseudoMap::load(),
             crate::trade::stats::StatCatalog::default(),
             crate::observe::ObservationLog::new(&path),
+            std::sync::Arc::new(std::sync::RwLock::new(
+                crate::trade::value::ValueModel::default(),
+            )),
         );
         let est = pricer
             .price(&ring(), "Standard", &TradeSession::for_test())
@@ -445,6 +471,9 @@ mod tests {
             crate::trade::pseudo::PseudoMap::load(),
             crate::trade::stats::StatCatalog::default(),
             crate::observe::ObservationLog::new(&path),
+            std::sync::Arc::new(std::sync::RwLock::new(
+                crate::trade::value::ValueModel::default(),
+            )),
         );
         let n = pricer
             .harvest(
@@ -528,6 +557,9 @@ mod tests {
             crate::trade::pseudo::PseudoMap::load(),
             crate::trade::stats::StatCatalog::default(),
             crate::observe::ObservationLog::new(&path),
+            std::sync::Arc::new(std::sync::RwLock::new(
+                crate::trade::value::ValueModel::default(),
+            )),
         );
         let n = pricer
             .harvest(

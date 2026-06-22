@@ -18,6 +18,7 @@ use poeninja::NinjaClient;
 use store::{PriceStore, Snapshot};
 use trade::client::TradeClient;
 use trade::pseudo::PseudoMap;
+use trade::value::{rebuild_into, ValueModel, VALUE_REFRESH_MINS};
 use trade::TradePricer;
 
 async fn refresh_once(
@@ -52,6 +53,19 @@ fn spawn_refresher(
                 tracing::error!(error = %e, "refresh failed; keeping last snapshot");
             }
             tokio::time::sleep(interval).await;
+        }
+    });
+}
+
+fn spawn_value_refresher(
+    log: ObservationLog,
+    value: std::sync::Arc<std::sync::RwLock<ValueModel>>,
+    interval: Duration,
+) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(interval).await;
+            rebuild_into(&log, &value);
         }
     });
 }
@@ -94,11 +108,20 @@ async fn main() -> Result<()> {
             trade::categories::CategoryCatalog::default()
         }
     };
+    let value = std::sync::Arc::new(std::sync::RwLock::new(ValueModel::default()));
+    rebuild_into(&ObservationLog::new(&config.observation_log_path), &value); // startup build
+    spawn_value_refresher(
+        ObservationLog::new(&config.observation_log_path),
+        value.clone(),
+        Duration::from_secs(VALUE_REFRESH_MINS * 60),
+    );
+
     let pricer = std::sync::Arc::new(TradePricer::new(
         trade_client,
         PseudoMap::load(),
         catalog,
         ObservationLog::new(&config.observation_log_path),
+        value.clone(),
     ));
     let sessions = std::sync::Arc::new(crate::trade::session::MemberSessions::new(
         config.proxy.clone(),
@@ -123,6 +146,7 @@ async fn main() -> Result<()> {
                 discord::price::price(),
                 discord::farm::farm(),
                 discord::harvest::harvest(),
+                discord::insights::insights(),
                 discord::paste::paste(),
                 discord::logout::logout(),
                 discord::help::help(),
@@ -141,6 +165,7 @@ async fn main() -> Result<()> {
                     rates,
                     sessions,
                     categories: category_catalog,
+                    value: value.clone(),
                 })
             })
         })

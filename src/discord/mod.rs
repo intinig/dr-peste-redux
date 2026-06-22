@@ -2,6 +2,7 @@ pub mod embeds;
 pub mod farm;
 pub mod harvest;
 pub mod help;
+pub mod insights;
 pub mod logout;
 pub mod paste;
 pub mod price;
@@ -22,6 +23,7 @@ pub struct Data {
     pub rates: Arc<RwLock<crate::trade::rates::RateTable>>,
     pub sessions: Arc<crate::trade::session::MemberSessions>,
     pub categories: crate::trade::categories::CategoryCatalog,
+    pub value: Arc<RwLock<crate::trade::value::ValueModel>>,
 }
 
 pub type Error = anyhow::Error;

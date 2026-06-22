@@ -92,6 +92,8 @@ struct RawEntry {
 #[derive(Debug, Default)]
 pub struct StatCatalog {
     groups: HashMap<StatGroup, HashMap<String, String>>,
+    /// stat_id -> original display text, for reverse lookup in /insights.
+    labels: HashMap<String, String>,
 }
 
 impl StatCatalog {
@@ -108,16 +110,18 @@ impl StatCatalog {
             StatGroup::Pseudo,
         ];
         let mut groups: HashMap<StatGroup, HashMap<String, String>> = HashMap::new();
+        let mut labels: HashMap<String, String> = HashMap::new();
         for g in &raw.result {
             if let Some(sg) = want.iter().copied().find(|s| s.json_id() == g.id) {
                 let map = groups.entry(sg).or_default();
                 for e in &g.entries {
                     map.entry(normalize(&e.text))
                         .or_insert_with(|| e.id.clone());
+                    labels.entry(e.id.clone()).or_insert_with(|| e.text.clone());
                 }
             }
         }
-        Ok(StatCatalog { groups })
+        Ok(StatCatalog { groups, labels })
     }
 
     /// Looks up the stat id for a clipboard mod line within a group.
@@ -127,6 +131,11 @@ impl StatCatalog {
 
     pub fn is_empty(&self) -> bool {
         self.groups.values().all(|m| m.is_empty())
+    }
+
+    /// Reverse lookup: the display text for a stat id, if known.
+    pub fn label_for(&self, stat_id: &str) -> Option<&str> {
+        self.labels.get(stat_id).map(String::as_str)
     }
 
     /// Fetches the live catalog from the trade2 API.
@@ -235,6 +244,17 @@ mod tests {
             .as_deref(),
             Some("explicit.stat_rarity")
         );
+    }
+
+    #[test]
+    fn label_for_reverses_id_to_text() {
+        let c = cat();
+        // stats_sample.json maps "+40 to maximum Life" -> explicit.stat_3299347043
+        assert_eq!(
+            c.label_for("explicit.stat_3299347043"),
+            Some("# to maximum Life")
+        );
+        assert_eq!(c.label_for("explicit.stat_nope"), None);
     }
 
     #[tokio::test]
