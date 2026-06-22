@@ -24,7 +24,10 @@ impl CategoryCatalog {
     /// Walks to the object whose `"id" == "category"` and reads `option.options`,
     /// skipping the null-id "Any" entry.
     pub fn from_filters_json(body: &str) -> Self {
-        let v: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+        let v: Value = serde_json::from_str(body).unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "failed to parse /data/filters; using empty category catalog");
+            Value::Null
+        });
         let mut categories = Vec::new();
         Self::collect(&v, &mut categories);
         CategoryCatalog { categories }

@@ -141,6 +141,12 @@ impl<C: Comparables + crate::trade::client::TradeApi> TradePricer<C> {
         session: &TradeSession,
     ) -> Result<usize> {
         let mut logged = 0usize;
+        // Bands overlap when a category has fewer than HARVEST_SAMPLE listings
+        // below the next threshold (the min-only lower band then re-fetches the
+        // higher band's items). Dedup by listing id across bands so the corpus
+        // isn't skewed toward the same high-priced items. Empty ids can't be
+        // deduped, so they're always logged.
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         for band in PRICE_BANDS {
             let q = crate::trade::model::TradeQuery {
                 league: league.to_string(),
@@ -175,6 +181,9 @@ impl<C: Comparables + crate::trade::client::TradeApi> TradePricer<C> {
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
             for l in &listings {
+                if !l.id.is_empty() && !seen.insert(l.id.clone()) {
+                    continue; // already logged this listing from an earlier band
+                }
                 let obs = Observation {
                     timestamp_unix,
                     league: league.to_string(),
@@ -452,5 +461,86 @@ mod tests {
         assert!(body.contains("\"source\":\"harvest\""));
         assert!(body.contains("\"category\":\"Staff\""));
         assert!(body.contains("Chiming Staff"));
+    }
+
+    #[tokio::test]
+    async fn harvest_dedupes_listings_shared_across_bands() {
+        use crate::trade::client::TradeApi;
+        use crate::trade::model::SearchResponse;
+
+        // Every band's search returns one shared listing id plus one band-unique
+        // one — simulating sparse categories where the lower min-only band
+        // re-fetches higher-band items. The shared id must be logged once.
+        struct OverlapFake;
+        #[async_trait]
+        impl Comparables for OverlapFake {
+            async fn comparables(
+                &self,
+                _q: &TradeQuery,
+                _l: usize,
+                _mr: usize,
+                _s: &TradeSession,
+            ) -> anyhow::Result<Vec<Listing>> {
+                Ok(vec![])
+            }
+        }
+        #[async_trait]
+        impl TradeApi for OverlapFake {
+            async fn search(
+                &self,
+                q: &TradeQuery,
+                _s: &TradeSession,
+            ) -> anyhow::Result<SearchResponse> {
+                let band = q.min_price_divine.unwrap_or(0.0);
+                Ok(SearchResponse {
+                    id: format!("q{band}"),
+                    total: 2,
+                    hashes: vec!["shared".into(), format!("u{band}")],
+                })
+            }
+            async fn fetch(
+                &self,
+                _id: &str,
+                hashes: &[String],
+                _s: &TradeSession,
+            ) -> anyhow::Result<Vec<Listing>> {
+                Ok(hashes
+                    .iter()
+                    .map(|h| Listing {
+                        price: Money {
+                            amount: 1.0,
+                            currency: Currency::Divine,
+                        },
+                        price_divine: 1.0,
+                        explicit_count: 1,
+                        id: h.clone(),
+                        base_type: Some("Chiming Staff".into()),
+                        mods: vec![],
+                    })
+                    .collect())
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("obs.jsonl");
+        let pricer = TradePricer::new(
+            OverlapFake,
+            crate::trade::pseudo::PseudoMap::load(),
+            crate::trade::stats::StatCatalog::default(),
+            crate::observe::ObservationLog::new(&path),
+        );
+        let n = pricer
+            .harvest(
+                "weapon.staff",
+                "Staff",
+                "Standard",
+                &TradeSession::for_test(),
+            )
+            .await
+            .unwrap();
+        // 1 shared (logged once) + one unique per band.
+        assert_eq!(n, 1 + PRICE_BANDS.len());
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(body.lines().count(), 1 + PRICE_BANDS.len());
     }
 }
