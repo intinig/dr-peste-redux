@@ -90,7 +90,7 @@ pub async fn insights(
                         .description(format!("No market data yet for **{canon}** in {league}.")),
                     Some(cat) if cat.sample_size < MIN_CATEGORY_SAMPLE => {
                         serenity::CreateEmbed::default().title(canon.clone()).description(format!(
-                            "Only {} listings for **{canon}** so far (need ≥{MIN_CATEGORY_SAMPLE} for reliable insights). Harvest more.",
+                            "Only {} listings for **{canon}** in {league} so far (need ≥{MIN_CATEGORY_SAMPLE} for reliable insights). Harvest more.",
                             cat.sample_size
                         ))
                     }

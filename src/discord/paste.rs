@@ -265,25 +265,31 @@ pub(crate) async fn ensure_session(
     )
     .await?;
 
+    // Helper: clear the now-stale connect button and show a terminal status on
+    // the original ephemeral message, so a dead button isn't left behind.
+    let finish = |content: &'static str| {
+        reply.edit(
+            *ctx,
+            poise::CreateReply::default()
+                .content(content)
+                .components(vec![]),
+        )
+    };
+
     let Some(modal) = submitted else {
-        return Ok(None); // member dismissed the modal
+        finish("Connect cancelled — run the command again when ready.").await?;
+        return Ok(None);
     };
 
     if !valid_poesessid(&modal.poesessid) {
-        ctx.send(poise::CreateReply::default().ephemeral(true).content("That doesn't look like a POESESSID (expected 32 hex chars). Run the command again and try once more."))
-            .await?;
+        finish("That doesn't look like a POESESSID (expected 32 hex chars). Run the command again and try once more.").await?;
         return Ok(None);
     }
 
     let cookie = secrecy::SecretString::new(modal.poesessid.trim().to_string());
     if let Err(e) = ctx.data().sessions.store(uid, cookie).await {
         tracing::warn!(error = %e, "session store/validation failed"); // never logs the cookie
-        ctx.send(
-            poise::CreateReply::default()
-                .ephemeral(true)
-                .content("Couldn't reach the trade site — please try again in a moment."),
-        )
-        .await?;
+        finish("Couldn't reach the trade site — please try again in a moment.").await?;
         return Ok(None);
     }
 

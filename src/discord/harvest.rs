@@ -46,16 +46,11 @@ pub async fn harvest(
         return Ok(());
     };
 
-    // Reuse the shared connect dialog: if the member has no session, prompt for
-    // their POESESSID inline (same button + modal as /paste) rather than
-    // dead-ending to a "go run /paste" message.
-    let uid = ctx.author().id.get();
-    let session = match data.sessions.session_for(uid) {
-        Some(s) => s,
-        None => match crate::discord::paste::ensure_session(&ctx).await? {
-            Some(s) => s,
-            None => return Ok(()), // user dismissed / timed out / invalid (already messaged)
-        },
+    // Reuse the shared connect dialog: ensure_session fast-paths an existing
+    // session and otherwise prompts for the POESESSID inline (same button + modal
+    // as /paste), rather than dead-ending to a "go run /paste" message.
+    let Some(session) = crate::discord::paste::ensure_session(&ctx).await? else {
+        return Ok(()); // user dismissed / timed out / invalid (already messaged)
     };
 
     let reply = ctx
