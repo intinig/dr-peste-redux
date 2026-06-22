@@ -114,7 +114,7 @@ struct StatValue {
     label: Option<String>,       // human label via StatCatalog if resolvable
     count: usize,                // listings carrying this stat
     median_with: f64,            // median price of listings carrying it
-    lift: f64,                   // median_with / base_median  (univariate)
+    lift: f64,                   // median_with / median_without  (marginal lift)
     conditional_lift: Option<f64>, // deconfounded lift (insights ranking); None if subset too thin
     top_decile_freq: f64,        // fraction of top-10%-priced listings carrying it
 }
@@ -125,8 +125,15 @@ struct ModPair { a: String, b: String, count: usize }  // co-occurrence count am
 ### Metrics
 
 - **base_median** — median `price_divine` across the category's listings.
-- **lift** (univariate) — `median_with / base_median`. >1 ⇒ the stat associates
-  with higher price. Used by the **pricing feedback**.
+- **lift** (univariate marginal lift) — `median_with / median_without`: the
+  median price of listings carrying the stat over the median of those without it.
+  >1 ⇒ the stat associates with higher price. Used by the **pricing feedback**.
+  (Revised 2026-06-22 from `median_with / base_median`, which collapses to ≈1 for
+  a driver that is common among priced listings — base_median is then dragged up
+  to the driver's own price level. `median_without` is robust to driver
+  prevalence and is the standard lift definition. `base_median` is retained as a
+  reported field and as the denominator fallback when *every* listing carries the
+  stat.)
 - **top_decile_freq** — fraction of the most-expensive-10% listings (by
   `price_divine`) that carry the stat. "Is it actually *on* the expensive items."
 - **co-occurrence** — most frequent stat *pairs* among the top-decile listings.

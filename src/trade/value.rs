@@ -243,7 +243,7 @@ fn build_category(category: String, obs: &[&Observation]) -> CategoryModel {
     cooccurrences.truncate(TOP_COOCCURRENCE);
 
     // Deconfounded ranking fills conditional_lift + final order.
-    rank_deconfounded(&mut stats, obs, base_median);
+    rank_deconfounded(&mut stats, obs);
 
     CategoryModel {
         category,
@@ -260,7 +260,7 @@ fn build_category(category: String, obs: &[&Observation]) -> CategoryModel {
 /// already-picked drivers, and repeats. Fills `conditional_lift` and reorders
 /// `stats` (drivers first, in deconfounded order; the rest by raw lift after).
 /// Used for /insights ranking only — pricing reads raw `lift`.
-fn rank_deconfounded(stats: &mut Vec<StatValue>, obs: &[&Observation], base_median: f64) {
+fn rank_deconfounded(stats: &mut Vec<StatValue>, obs: &[&Observation]) {
     let trusted = |s: &StatValue| s.count >= MIN_STAT_SAMPLE && s.lift >= DRIVER_LIFT;
     let mut picked: Vec<String> = Vec::new();
     let mut ordered: Vec<StatValue> = Vec::new();
@@ -351,9 +351,22 @@ fn rank_deconfounded(stats: &mut Vec<StatValue>, obs: &[&Observation], base_medi
             .filter(|o| o.mods.iter().any(|m| m.stat_id == s.stat_id))
             .map(|o| o.price_divine)
             .collect();
-        if !with.is_empty() && final_median > 0.0 {
-            // Enough signal in the driver-free residual to estimate.
-            s.conditional_lift = Some(median(&with) / final_median);
+        if !with.is_empty() {
+            // Marginal lift in the driver-free residual: median(with) / median(without),
+            // consistent with the greedy loop (not divided by the whole-subset median).
+            let without_final: Vec<f64> = final_subset
+                .iter()
+                .filter(|o| !o.mods.iter().any(|m| m.stat_id == s.stat_id))
+                .map(|o| o.price_divine)
+                .collect();
+            let denom = if without_final.is_empty() {
+                final_median
+            } else {
+                median(&without_final)
+            };
+            if denom > 0.0 {
+                s.conditional_lift = Some(median(&with) / denom);
+            }
         } else if !picked.is_empty() {
             // Stat only co-appears with confirmed drivers — its independent
             // contribution is effectively 1 (no evidence it adds value alone).
@@ -368,7 +381,6 @@ fn rank_deconfounded(stats: &mut Vec<StatValue>, obs: &[&Observation], base_medi
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     ordered.extend(remaining);
-    let _ = base_median; // base_median is implicit in each StatValue.lift already
     *stats = ordered;
 }
 
@@ -489,7 +501,7 @@ mod tests {
         // Both look strong univariately…
         assert!(a.lift > 1.5 && b.lift > 1.5);
         // …but B's independent (conditional) lift collapses to ~1, A's stays high.
-        assert!(a.conditional_lift.unwrap() > 1.5);
+        assert!(a.conditional_lift.unwrap() > 5.0);
         assert!(
             b.conditional_lift.unwrap() < 1.3,
             "co-traveler should deconfound to ~1: {:?}",
