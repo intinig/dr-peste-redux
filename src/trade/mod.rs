@@ -36,6 +36,12 @@ const COMPARABLE_SAMPLE: usize = 100;
 const PRICE_SAMPLE: usize = 40;
 /// Number of characteristics to ablate in a breakdown.
 const TOP_K: usize = 4;
+/// Min-price bands (Divine) for a harvest sweep. Each band fetches the cheapest
+/// HARVEST_SAMPLE listings at or above it, so together they span the price
+/// spectrum (cheapest-first search otherwise hides the expensive end).
+const PRICE_BANDS: [f64; 4] = [0.0, 5.0, 20.0, 50.0];
+/// Cheapest listings fetched per band.
+const HARVEST_SAMPLE: usize = 100;
 
 pub struct TradePricer<C: Comparables> {
     comparables: C,
@@ -119,6 +125,73 @@ impl<C: Comparables> TradePricer<C> {
                 tracing::warn!(error = %e, "failed to append observation");
             }
         }
+    }
+}
+
+impl<C: Comparables + crate::trade::client::TradeApi> TradePricer<C> {
+    /// Price-band sweep of a whole category, logging every listing to the corpus
+    /// as a Harvest observation. Returns the number of observations logged. Each
+    /// search/fetch is throttle-paced by the member session; a per-band failure is
+    /// logged and skipped so one bad band doesn't abort the whole harvest.
+    pub async fn harvest(
+        &self,
+        category_id: &str,
+        category_text: &str,
+        league: &str,
+        session: &TradeSession,
+    ) -> Result<usize> {
+        let mut logged = 0usize;
+        for band in PRICE_BANDS {
+            let q = crate::trade::model::TradeQuery {
+                league: league.to_string(),
+                category: Some(category_id.to_string()),
+                type_line: None,
+                stats: vec![],
+                misc: crate::trade::model::MiscFilters::default(),
+                equipment: vec![],
+                min_price_divine: if band > 0.0 { Some(band) } else { None },
+            };
+            let resp = match self.comparables.search(&q, session).await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(error = %e, band, "harvest band search failed; skipping");
+                    continue;
+                }
+            };
+            let take = resp.hashes.len().min(HARVEST_SAMPLE);
+            let listings = match self
+                .comparables
+                .fetch(&resp.id, &resp.hashes[..take], session)
+                .await
+            {
+                Ok(l) => l,
+                Err(e) => {
+                    tracing::warn!(error = %e, band, "harvest band fetch failed; skipping");
+                    continue;
+                }
+            };
+            let timestamp_unix = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            for l in &listings {
+                let obs = Observation {
+                    timestamp_unix,
+                    league: league.to_string(),
+                    base_type: l.base_type.clone(),
+                    category: Some(category_text.to_string()),
+                    mods: l.mods.clone(),
+                    price_divine: l.price_divine,
+                    source: Source::Harvest,
+                };
+                if self.log.append(&obs).is_ok() {
+                    logged += 1;
+                } else {
+                    tracing::warn!("failed to append harvest observation");
+                }
+            }
+        }
+        Ok(logged)
     }
 }
 
@@ -295,5 +368,89 @@ mod tests {
         assert_eq!(lines.lines().count(), 5); // one observation per comparable
         assert!(lines.contains("\"source\":\"paste\""));
         assert!(lines.contains("Sapphire Ring")); // base_type from the parsed item
+    }
+
+    #[tokio::test]
+    async fn harvest_logs_one_observation_per_band_listing() {
+        use crate::trade::client::TradeApi;
+        use crate::trade::model::SearchResponse;
+
+        struct HarvestFake;
+        #[async_trait]
+        impl Comparables for HarvestFake {
+            async fn comparables(
+                &self,
+                _q: &TradeQuery,
+                _l: usize,
+                _mr: usize,
+                _s: &TradeSession,
+            ) -> anyhow::Result<Vec<Listing>> {
+                Ok(vec![])
+            }
+        }
+        #[async_trait]
+        impl TradeApi for HarvestFake {
+            async fn search(
+                &self,
+                q: &TradeQuery,
+                _s: &TradeSession,
+            ) -> anyhow::Result<SearchResponse> {
+                let band = q.min_price_divine.unwrap_or(0.0);
+                Ok(SearchResponse {
+                    id: format!("q{band}"),
+                    total: 1,
+                    hashes: vec![format!("h{band}")],
+                })
+            }
+            async fn fetch(
+                &self,
+                _id: &str,
+                hashes: &[String],
+                _s: &TradeSession,
+            ) -> anyhow::Result<Vec<Listing>> {
+                Ok(hashes
+                    .iter()
+                    .map(|h| Listing {
+                        price: Money {
+                            amount: 1.0,
+                            currency: Currency::Divine,
+                        },
+                        price_divine: 1.0,
+                        explicit_count: 1,
+                        id: h.clone(),
+                        base_type: Some("Chiming Staff".into()),
+                        mods: vec![crate::trade::model::ListingMod {
+                            stat_id: "explicit.stat_1".into(),
+                            tier: Some(1),
+                            roll: Some(50.0),
+                        }],
+                    })
+                    .collect())
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("obs.jsonl");
+        let pricer = TradePricer::new(
+            HarvestFake,
+            crate::trade::pseudo::PseudoMap::load(),
+            crate::trade::stats::StatCatalog::default(),
+            crate::observe::ObservationLog::new(&path),
+        );
+        let n = pricer
+            .harvest(
+                "weapon.staff",
+                "Staff",
+                "Standard",
+                &TradeSession::for_test(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(n, PRICE_BANDS.len()); // one listing per band
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(body.lines().count(), PRICE_BANDS.len());
+        assert!(body.contains("\"source\":\"harvest\""));
+        assert!(body.contains("\"category\":\"Staff\""));
+        assert!(body.contains("Chiming Staff"));
     }
 }
