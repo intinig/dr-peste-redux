@@ -129,8 +129,10 @@ pub async fn estimate<C: Comparables + ?Sized>(
 /// precise match. The estimate may be empty (`listing_count == 0`) when a base
 /// has no live listings at all; callers surface that as a thin-market result.
 ///
-/// Returns `(estimate, listings)` where `listings` is the comparable set the
-/// estimate was computed over — the caller can log these as observations.
+/// Returns `(estimate, observations)`. `observations` is the set the caller logs
+/// to the corpus: the priced-over comparables, plus — on the thin/relaxed path —
+/// the rare exact full-constraint matches (unioned by listing id), since those
+/// are the most informative examples even though the estimate is the broad set.
 pub async fn price_check<C: Comparables + ?Sized>(
     c: &C,
     query: &TradeQuery,
@@ -149,7 +151,21 @@ pub async fn price_check<C: Comparables + ?Sized>(
     // on the low-confidence broad-market path regardless of how many it returns.
     let relaxed = c.comparables(query, limit, max_relax, session).await?;
     let est = estimate_from(&relaxed, EstimateBasis::BroadMarket);
-    Ok((est, relaxed))
+    // The estimate is the relaxed (broad) set, but the corpus also keeps the thin
+    // exact matches — the most informative observations, often priced out of the
+    // relaxed cheapest-N. Union by listing id (empty ids can't dedup → kept).
+    let mut to_log = relaxed;
+    let seen: std::collections::HashSet<String> = to_log
+        .iter()
+        .filter(|l| !l.id.is_empty())
+        .map(|l| l.id.clone())
+        .collect();
+    for l in exact {
+        if l.id.is_empty() || !seen.contains(&l.id) {
+            to_log.push(l);
+        }
+    }
+    Ok((est, to_log))
 }
 
 /// Linear-interpolation percentile of an ascending-sorted slice. `p` in [0,1].
@@ -899,5 +915,53 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(est.basis, EstimateBasis::CraftTier);
+    }
+
+    #[tokio::test]
+    async fn price_check_logs_union_of_exact_and_relaxed() {
+        // Exact (max_relax=0) returns 2 thin matches; relaxed returns 12 broader
+        // ones — all with distinct ids. The logged set must be the union (14): the
+        // estimate is the relaxed set, but the rare exact matches are kept too.
+        fn lst(divine: f64, id: &str) -> Listing {
+            Listing {
+                price: Money {
+                    amount: divine,
+                    currency: Currency::Divine,
+                },
+                price_divine: divine,
+                explicit_count: 1,
+                id: id.to_string(),
+                mods: vec![],
+            }
+        }
+        struct ExactThin;
+        #[async_trait]
+        impl Comparables for ExactThin {
+            async fn comparables(
+                &self,
+                _q: &TradeQuery,
+                _l: usize,
+                max_relax: usize,
+                _s: &TradeSession,
+            ) -> anyhow::Result<Vec<Listing>> {
+                if max_relax == 0 {
+                    Ok((0..2)
+                        .map(|i| lst(50.0 + i as f64, &format!("exact-{i}")))
+                        .collect())
+                } else {
+                    Ok((0..12)
+                        .map(|i| lst(2.0 + i as f64, &format!("relaxed-{i}")))
+                        .collect())
+                }
+            }
+        }
+        let q = two_stat_query();
+        let (est, to_log) =
+            price_check(&ExactThin, &q, 40, q.stats.len(), &TradeSession::for_test())
+                .await
+                .unwrap();
+        assert_eq!(est.basis, EstimateBasis::BroadMarket); // priced on the relaxed set
+        assert_eq!(to_log.len(), 14); // 12 relaxed + 2 exact, distinct ids → no dedup
+        assert!(to_log.iter().any(|l| l.id == "exact-0"));
     }
 }

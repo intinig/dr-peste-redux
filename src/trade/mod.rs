@@ -140,19 +140,20 @@ mod tests {
             _max_relax: usize,
             _session: &TradeSession,
         ) -> anyhow::Result<Vec<Listing>> {
-            Ok(vec![
-                Listing {
+            // 8 listings with distinct, stable ids so the exact∪relaxed union in
+            // price_check dedups deterministically to 8 (not 16).
+            Ok((0..8)
+                .map(|i| Listing {
                     price: Money {
                         amount: self.0,
-                        currency: Currency::Divine
+                        currency: Currency::Divine,
                     },
                     price_divine: self.0,
                     explicit_count: 0,
-                    id: String::new(),
+                    id: format!("flat-{i}"),
                     mods: vec![],
-                };
-                8
-            ])
+                })
+                .collect())
         }
     }
 
@@ -193,14 +194,18 @@ mod tests {
         }
     }
 
-    fn make_pricer<C: Comparables>(c: C) -> TradePricer<C> {
+    // Returns the TempDir alongside the pricer so the caller keeps it alive —
+    // otherwise the dir is deleted at return and the ObservationLog appends fail
+    // (silently, since logging is best-effort), masking regressions.
+    fn make_pricer<C: Comparables>(c: C) -> (TradePricer<C>, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
-        TradePricer::new(
+        let pricer = TradePricer::new(
             c,
             crate::trade::pseudo::PseudoMap::load(),
             crate::trade::stats::StatCatalog::default(),
             crate::observe::ObservationLog::new(dir.path().join("obs.jsonl")),
-        )
+        );
+        (pricer, dir)
     }
 
     #[tokio::test]
@@ -242,7 +247,7 @@ mod tests {
                     .collect())
             }
         }
-        let pricer = make_pricer(Comps);
+        let (pricer, _dir) = make_pricer(Comps);
         let est = pricer
             .price(&ring(), "Standard", &TradeSession::for_test())
             .await

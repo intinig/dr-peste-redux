@@ -50,7 +50,9 @@ impl ObservationLog {
     /// panicked, so a logging failure can be downgraded to a warning by the caller.
     pub fn append(&self, obs: &Observation) -> Result<()> {
         let line = serde_json::to_string(obs)?;
-        let _guard = self.lock.lock().unwrap();
+        // Recover from a poisoned mutex rather than panic — logging is best-effort
+        // and must never crash the bot after an unrelated thread panicked.
+        let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         let mut f = OpenOptions::new()
             .create(true)
             .append(true)
