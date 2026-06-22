@@ -28,7 +28,8 @@ pub struct StatValue {
     pub label: Option<String>,
     pub count: usize,
     pub median_with: f64,
-    /// Univariate lift = median_with / base_median. Used by pricing feedback.
+    /// Marginal lift = median_with / median_without (falls back to base_median
+    /// only when every listing carries the stat). Used by pricing feedback.
     pub lift: f64,
     /// Lift conditioned on the higher-ranked drivers being absent — deconfounded.
     /// `None` when the driver-free subset was too thin to compute. Insights only.
