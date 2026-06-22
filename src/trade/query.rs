@@ -233,16 +233,19 @@ mod tests {
                     raw: "+40 to maximum Life".into(),
                     value: Some(40.0),
                     affix: None,
+                    tier: None,
                 },
                 ItemStat {
                     raw: "+32% to Fire Resistance".into(),
                     value: Some(32.0),
                     affix: None,
+                    tier: None,
                 },
                 ItemStat {
                     raw: "+18% to Lightning Resistance".into(),
                     value: Some(18.0),
                     affix: None,
+                    tier: None,
                 },
             ],
         }
@@ -272,11 +275,13 @@ mod tests {
                     raw: "+32% to Fire Resistance".into(),
                     value: Some(32.0),
                     affix: None,
+                    tier: None,
                 },
                 ItemStat {
                     raw: "+18% to Lightning Resistance".into(),
                     value: Some(18.0),
                     affix: None,
+                    tier: None,
                 },
             ],
         };
@@ -353,6 +358,7 @@ mod tests {
             raw: "80% increased Spell Damage".into(),
             value: Some(80.0),
             affix: None,
+            tier: None,
         });
         let q = build_baseline(&item, &PseudoMap::load(), &catalog, "Standard");
         // spell damage is non-pseudo → individual banded filter (round(0.9*80)=72, round(1.4*80)=112)
@@ -460,17 +466,20 @@ mod tests {
                 raw: "+18% to Cold Resistance".into(),
                 value: Some(18.0),
                 affix: None,
+                tier: None,
             }],
             explicits: vec![
                 ItemStat {
                     raw: "+34% to Lightning Resistance".into(),
                     value: Some(34.0),
                     affix: None,
+                    tier: None,
                 },
                 ItemStat {
                     raw: "+39% to Fire Resistance".into(),
                     value: Some(39.0),
                     affix: None,
+                    tier: None,
                 },
             ],
         };
@@ -510,17 +519,20 @@ mod tests {
                 raw: "10% increased Cast Speed".into(),
                 value: Some(10.0),
                 affix: None,
+                tier: None,
             }],
             enchants: vec![],
             runes: vec![ItemStat {
                 raw: "+1 to Level of all Spell Skills".into(),
                 value: Some(1.0),
                 affix: None,
+                tier: None,
             }],
             explicits: vec![ItemStat {
                 raw: "201% increased Spell Physical Damage".into(),
                 value: Some(201.0),
                 affix: Some(crate::itemtext::Affix::Prefix),
+                tier: None,
             }],
         };
         let catalog = StatCatalog::from_json(include_str!("fixtures/stats_sample.json")).unwrap();

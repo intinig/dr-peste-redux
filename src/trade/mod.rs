@@ -184,6 +184,7 @@ mod tests {
                 raw: "+40 to maximum Life".into(),
                 value: Some(40.0),
                 affix: None,
+                tier: None,
             }],
         }
     }
@@ -234,11 +235,13 @@ mod tests {
                     raw: "+40 to maximum Life".into(),
                     value: Some(40.0),
                     affix: Some(Affix::Prefix),
+                    tier: None,
                 },
                 ItemStat {
                     raw: "+15% to Cold Resistance".into(),
                     value: Some(15.0),
                     affix: Some(Affix::Suffix),
+                    tier: None,
                 },
             ],
         }
