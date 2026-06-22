@@ -41,6 +41,9 @@ pub struct ItemStat {
     /// Prefix/Suffix when known (Advanced-Mode `{ … Modifier … }` annotation);
     /// `None` for implicit/enchant/rune lines and for basic-clipboard pastes.
     pub affix: Option<Affix>,
+    /// Affix tier `N` from a `{ … (Tier: N) … }` annotation (1 = best). `None`
+    /// for basic clipboards and for continuation lines of a hybrid block.
+    pub tier: Option<u8>,
 }
 
 fn is_separator(s: &str) -> bool {
@@ -135,6 +138,18 @@ fn split_tag(l: &str) -> (String, Option<String>) {
     (l.to_string(), None)
 }
 
+/// Extracts `N` from an Advanced-Mode annotation line like
+/// `{ Prefix Modifier "Oppressor's" (Tier: 2) … }`. `None` if absent/unparseable.
+fn parse_tier(annotation: &str) -> Option<u8> {
+    let after = annotation.split("(Tier:").nth(1)?;
+    let digits: String = after
+        .trim_start()
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    digits.parse().ok()
+}
+
 /// Parses the PoE2 clipboard format. Returns None if no "Rarity:" line or no
 /// name line is present.
 pub fn parse(text: &str) -> Option<ParsedItem> {
@@ -179,6 +194,7 @@ pub fn parse(text: &str) -> Option<ParsedItem> {
     let mut explicits = Vec::new();
 
     let mut current_affix: Option<Affix> = None;
+    let mut current_tier: Option<u8> = None;
     for (i, raw_line) in lines.iter().enumerate() {
         if i == idx || i == idx + 1 || i == idx + 2 {
             continue; // rarity, name, base type
@@ -193,10 +209,12 @@ pub fn parse(text: &str) -> Option<ParsedItem> {
             } else {
                 None // implicit/enchant/rune/other block — not a prefix/suffix
             };
+            current_tier = parse_tier(raw_line);
             continue;
         }
         if is_meta_line(raw_line) {
             current_affix = None; // separators/properties break an affix block
+            current_tier = None;
             continue;
         }
         let (clean, tag) = split_tag(raw_line);
@@ -204,6 +222,7 @@ pub fn parse(text: &str) -> Option<ParsedItem> {
             value: first_number(&clean),
             raw: clean,
             affix: None,
+            tier: None,
         };
         match tag.as_deref() {
             Some("implicit") => implicits.push(stat),
@@ -212,6 +231,7 @@ pub fn parse(text: &str) -> Option<ParsedItem> {
             _ => {
                 let mut s = stat;
                 s.affix = current_affix.take(); // one slot per { … } block; hybrid continuation lines get None
+                s.tier = current_tier.take(); // one tier per { … } block, like affix
                 explicits.push(s);
             }
         }
@@ -453,6 +473,39 @@ mod tests {
         assert_eq!(c.open_prefixes, 2);
         assert_eq!(c.filled_suffixes, 1);
         assert_eq!(c.explicit_count, 2); // 1 prefix block + 1 suffix block
+    }
+
+    #[test]
+    fn captures_tier_from_advanced_annotation() {
+        // RARE_BOOTS_ADVANCED already exists in this module: Hellion's (Tier 1)
+        // movement speed, of the Maelstrom (Tier 3) lightning res, of Magma (Tier 2)
+        // fire res, of Archaeology (Tier 1) rarity.
+        let p = parse(RARE_BOOTS_ADVANCED).unwrap();
+        let ms = p
+            .explicits
+            .iter()
+            .find(|s| s.raw.contains("Movement Speed"))
+            .unwrap();
+        let light = p
+            .explicits
+            .iter()
+            .find(|s| s.raw.contains("Lightning Resistance"))
+            .unwrap();
+        let fire = p
+            .explicits
+            .iter()
+            .find(|s| s.raw.contains("Fire Resistance"))
+            .unwrap();
+        assert_eq!(ms.tier, Some(1));
+        assert_eq!(light.tier, Some(3));
+        assert_eq!(fire.tier, Some(2));
+    }
+
+    #[test]
+    fn tier_absent_on_basic_clipboard() {
+        // RARE_RING has no Advanced-Mode annotations.
+        let p = parse(RARE_RING).unwrap();
+        assert!(p.explicits.iter().all(|s| s.tier.is_none()));
     }
 
     #[test]

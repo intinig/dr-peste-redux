@@ -150,26 +150,6 @@ impl RateLimiter {
             }
         }
     }
-
-    /// Ballpark wall-clock to send `n` more requests on `ep`, from the current
-    /// window + learned rules. Best-effort: if the bucket is momentarily locked,
-    /// estimates against an empty window.
-    pub fn estimate(&self, ep: Endpoint, n: usize) -> Duration {
-        let secs = match self.bucket(ep).try_lock() {
-            Ok(b) => {
-                let now = Instant::now();
-                let mut ages: Vec<f64> = b
-                    .sends
-                    .iter()
-                    .map(|t| now.duration_since(*t).as_secs_f64())
-                    .collect();
-                ages.sort_by(|a, c| a.partial_cmp(c).unwrap_or(std::cmp::Ordering::Equal));
-                estimate_secs(&b.rules, &ages, n)
-            }
-            Err(_) => estimate_secs(&Bucket::with_defaults().rules, &[], n),
-        };
-        Duration::from_secs_f64(secs)
-    }
 }
 
 /// Rules from the `Account`/`Ip` limit headers (their union — every request
@@ -223,29 +203,6 @@ fn wait_secs(rules: &[RateRule], ages: &[f64]) -> f64 {
         }
     }
     wait.max(0.0)
-}
-
-/// Expected seconds to send `n` more requests, simulating the sliding window
-/// forward: each request waits `wait_secs` then occupies a slot. `ages` are the
-/// current window's send ages (ascending), as in `wait_secs`.
-fn estimate_secs(rules: &[RateRule], ages: &[f64], n: usize) -> f64 {
-    if rules.is_empty() || n == 0 {
-        return 0.0;
-    }
-    // Work in "time since now"; a send at simulated time t has age (clock - t).
-    let mut clock = 0.0_f64;
-    let mut sends: Vec<f64> = ages.iter().map(|a| -a).collect(); // send times (≤0)
-    let longest = rules.iter().map(|r| r.period).max().unwrap_or(0) as f64;
-    for _ in 0..n {
-        let cur: Vec<f64> = sends.iter().map(|t| clock - t).collect();
-        let mut sorted = cur.clone();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let w = wait_secs(rules, &sorted);
-        clock += w;
-        sends.push(clock);
-        sends.retain(|t| clock - t <= longest);
-    }
-    clock
 }
 
 #[cfg(test)]
@@ -387,16 +344,5 @@ mod tests {
         // Only the tightest (10s) window is reconciled (5); the 300s window's 30
         // does not pollute it.
         assert_eq!(lim.fetch.lock().await.sends.len(), 5);
-    }
-
-    #[test]
-    fn estimate_scales_with_n_and_rules() {
-        // 5 per 10s: the first 5 are ~free, then ~one per 2s.
-        assert_eq!(estimate_secs(&[rule(5, 10)], &[], 5).round() as i64, 0);
-        // 10 requests against 5/10s ⇒ ~10s of waiting for the extra 5.
-        let t = estimate_secs(&[rule(5, 10)], &[], 10);
-        assert!((9.0..=11.0).contains(&t), "got {t}");
-        // No rules ⇒ instant.
-        assert_eq!(estimate_secs(&[], &[], 50), 0.0);
     }
 }

@@ -21,6 +21,14 @@ fn band(v: f64) -> (Option<f64>, Option<f64>) {
     (Some(lo), Some(hi))
 }
 
+/// Cornerstone affixes are searched *exact* (min = roll, no max) because a worse
+/// roll is a materially different item: `+X to skill levels` and movement speed.
+/// This is the one hand-coded value-known; everything else is banded/relaxed.
+fn is_cornerstone(raw: &str) -> bool {
+    let l = raw.to_lowercase();
+    l.contains("movement speed") || (l.contains("to level of") && l.contains("skill"))
+}
+
 pub fn build_baseline(
     item: &ParsedItem,
     pseudo: &PseudoMap,
@@ -79,31 +87,46 @@ pub fn build_baseline(
         }
     }
 
-    // Individual (non-fungible) mods: map each to its trade2 stat id and add a
-    // banded filter. Mods already covered by a pseudo aggregate are skipped to
-    // avoid double-constraining; unmatched mods are logged and skipped.
-    // Only explicit affixes are considered — runes/implicits/enchants are
-    // excluded for the same reason as above (they over-collapse comparables).
-    let buckets = [(&item.explicits, StatGroup::Explicit)];
-    for (mods, group) in buckets {
-        for m in mods {
-            if pseudo.covers(&m.raw) {
-                continue;
-            }
-            match catalog.match_stat(&m.raw, group) {
-                Some(id) => {
-                    let (min, max) = m.value.map(band).unwrap_or((None, None));
-                    stats.push(StatFilter {
-                        id,
-                        label: m.raw.clone(),
-                        min,
-                        max,
-                    });
-                }
-                None => tracing::debug!(item_mod = %m.raw, "no trade2 stat match; skipping filter"),
-            }
+    // Per-mod explicit filters, tagged for ordering. Cornerstones are searched
+    // exact (min = roll, no max); everything else uses the loose band.
+    let mut mod_filters: Vec<(bool, Option<u8>, StatFilter)> = Vec::new();
+    for m in &item.explicits {
+        if pseudo.covers(&m.raw) {
+            continue;
+        }
+        if let Some(id) = catalog.match_stat(&m.raw, StatGroup::Explicit) {
+            let corner = is_cornerstone(&m.raw);
+            let (min, max) = if corner {
+                (m.value, None) // exact: at least this roll, no upper bound
+            } else {
+                m.value.map(band).unwrap_or((None, None))
+            };
+            mod_filters.push((
+                corner,
+                m.tier,
+                StatFilter {
+                    id,
+                    label: m.raw.clone(),
+                    min,
+                    max,
+                },
+            ));
+        } else {
+            tracing::debug!(item_mod = %m.raw, "no trade2 stat match; skipping filter");
         }
     }
+    // Order: cornerstones first (dropped last in relaxation), then normal mods
+    // strongest→weakest by tier (lower tier number = stronger; unknown tier =
+    // weakest, sorted last). `gather_comparables` pops the last stat, so the
+    // weakest normal mod is dropped first and cornerstones survive longest.
+    mod_filters.sort_by_key(|(corner, tier, _)| (!*corner, tier.unwrap_or(u8::MAX)));
+    // `stats` already holds the pseudo-aggregate filters; append the ordered mods
+    // after them, but keep cornerstones ahead of pseudo so they're dropped last.
+    let (corners, normals): (Vec<_>, Vec<_>) = mod_filters.into_iter().partition(|(c, _, _)| *c);
+    let mut ordered: Vec<StatFilter> = corners.into_iter().map(|(_, _, f)| f).collect();
+    ordered.append(&mut stats); // pseudo aggregates in the middle
+    ordered.extend(normals.into_iter().map(|(_, _, f)| f));
+    let stats = ordered;
 
     let mut equipment = Vec::new();
     for (key, val) in [
@@ -132,15 +155,6 @@ pub fn build_baseline(
             corrupted: Some(item.corrupted),
         },
         equipment,
-    }
-}
-
-/// The same query with all stat filters removed (type + misc + equipment kept).
-/// Used by the marginal-contribution sampler to fetch the base population.
-pub fn base_query(q: &TradeQuery) -> TradeQuery {
-    TradeQuery {
-        stats: Vec::new(),
-        ..q.clone()
     }
 }
 
@@ -233,16 +247,19 @@ mod tests {
                     raw: "+40 to maximum Life".into(),
                     value: Some(40.0),
                     affix: None,
+                    tier: None,
                 },
                 ItemStat {
                     raw: "+32% to Fire Resistance".into(),
                     value: Some(32.0),
                     affix: None,
+                    tier: None,
                 },
                 ItemStat {
                     raw: "+18% to Lightning Resistance".into(),
                     value: Some(18.0),
                     affix: None,
+                    tier: None,
                 },
             ],
         }
@@ -272,11 +289,13 @@ mod tests {
                     raw: "+32% to Fire Resistance".into(),
                     value: Some(32.0),
                     affix: None,
+                    tier: None,
                 },
                 ItemStat {
                     raw: "+18% to Lightning Resistance".into(),
                     value: Some(18.0),
                     affix: None,
+                    tier: None,
                 },
             ],
         };
@@ -353,6 +372,7 @@ mod tests {
             raw: "80% increased Spell Damage".into(),
             value: Some(80.0),
             affix: None,
+            tier: None,
         });
         let q = build_baseline(&item, &PseudoMap::load(), &catalog, "Standard");
         // spell damage is non-pseudo → individual banded filter (round(0.9*80)=72, round(1.4*80)=112)
@@ -460,17 +480,20 @@ mod tests {
                 raw: "+18% to Cold Resistance".into(),
                 value: Some(18.0),
                 affix: None,
+                tier: None,
             }],
             explicits: vec![
                 ItemStat {
                     raw: "+34% to Lightning Resistance".into(),
                     value: Some(34.0),
                     affix: None,
+                    tier: None,
                 },
                 ItemStat {
                     raw: "+39% to Fire Resistance".into(),
                     value: Some(39.0),
                     affix: None,
+                    tier: None,
                 },
             ],
         };
@@ -510,17 +533,20 @@ mod tests {
                 raw: "10% increased Cast Speed".into(),
                 value: Some(10.0),
                 affix: None,
+                tier: None,
             }],
             enchants: vec![],
             runes: vec![ItemStat {
                 raw: "+1 to Level of all Spell Skills".into(),
                 value: Some(1.0),
                 affix: None,
+                tier: None,
             }],
             explicits: vec![ItemStat {
                 raw: "201% increased Spell Physical Damage".into(),
                 value: Some(201.0),
                 affix: Some(crate::itemtext::Affix::Prefix),
+                tier: None,
             }],
         };
         let catalog = StatCatalog::from_json(include_str!("fixtures/stats_sample.json")).unwrap();
@@ -539,28 +565,78 @@ mod tests {
     }
 
     #[test]
-    fn base_query_clears_stats_keeps_type_and_misc() {
-        use crate::trade::model::{MiscFilters, StatFilter};
-        let q = TradeQuery {
-            league: "L".into(),
-            category: None,
-            type_line: Some("Chiming Staff".into()),
-            stats: vec![StatFilter {
-                id: "explicit.stat_1".into(),
-                label: "x".into(),
-                min: Some(1.0),
-                max: Some(2.0),
-            }],
-            misc: MiscFilters {
-                item_level_min: Some(80),
-                quality_min: None,
-                corrupted: Some(false),
-            },
-            equipment: vec![],
+    fn cornerstone_detects_skill_levels_and_movement_speed() {
+        assert!(is_cornerstone("+6 to Level of all Physical Spell Skills"));
+        assert!(is_cornerstone("+1 to Level of all Spell Skills"));
+        assert!(is_cornerstone("35% increased Movement Speed"));
+        // Not cornerstones:
+        assert!(!is_cornerstone("201% increased Spell Physical Damage"));
+        assert!(!is_cornerstone("+298 to maximum Mana"));
+        assert!(!is_cornerstone("52% increased Cast Speed"));
+    }
+
+    #[test]
+    fn cornerstone_searched_exact_and_weakest_last() {
+        let item = ParsedItem {
+            rarity: crate::itemtext::Rarity::Rare,
+            name: "Test".into(),
+            base_type: Some("Sandsworn Sandals".into()),
+            item_class: Some("Boots".into()),
+            item_level: Some(80),
+            quality: None,
+            corrupted: false,
+            energy_shield: None,
+            armour: None,
+            evasion: None,
+            implicits: vec![],
+            enchants: vec![],
+            runes: vec![],
+            explicits: vec![
+                ItemStat {
+                    raw: "35% increased Movement Speed".into(),
+                    value: Some(35.0),
+                    affix: Some(crate::itemtext::Affix::Prefix),
+                    tier: Some(1),
+                },
+                ItemStat {
+                    raw: "+34% to Lightning Resistance".into(),
+                    value: Some(34.0),
+                    affix: Some(crate::itemtext::Affix::Suffix),
+                    tier: Some(3),
+                },
+                ItemStat {
+                    raw: "+39% to Fire Resistance".into(),
+                    value: Some(39.0),
+                    affix: Some(crate::itemtext::Affix::Suffix),
+                    tier: Some(2),
+                },
+            ],
         };
-        let b = base_query(&q);
-        assert!(b.stats.is_empty());
-        assert_eq!(b.type_line, q.type_line);
-        assert_eq!(b.misc.item_level_min, Some(80));
+        let catalog = StatCatalog::from_json(include_str!("fixtures/stats_sample.json")).unwrap();
+        let q = build_baseline(&item, &PseudoMap::load(), &catalog, "Standard");
+
+        // Cornerstone (movement speed) is searched exact: min set, no max.
+        let ms = q
+            .stats
+            .iter()
+            .find(|s| s.label.contains("Movement Speed"))
+            .expect("movement speed filter present");
+        assert_eq!(ms.min, Some(35.0));
+        assert_eq!(ms.max, None);
+
+        // Resistances pseudo-group into total elemental resistance (not per-mod),
+        // so assert ordering via the cornerstone being before any non-cornerstone.
+        let ms_idx = q
+            .stats
+            .iter()
+            .position(|s| s.label.contains("Movement Speed"))
+            .unwrap();
+        assert!(
+            q.stats
+                .iter()
+                .enumerate()
+                .all(|(i, s)| s.label.contains("Movement Speed") || i > ms_idx),
+            "cornerstone must precede all non-cornerstone filters"
+        );
     }
 }

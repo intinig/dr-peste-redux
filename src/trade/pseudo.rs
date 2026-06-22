@@ -97,6 +97,7 @@ mod tests {
             raw: raw.to_string(),
             value: Some(v),
             affix: None,
+            tier: None,
         }
     }
 
