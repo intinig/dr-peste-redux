@@ -39,8 +39,11 @@ const PRICE_SAMPLE: usize = 40;
 const TOP_K: usize = 4;
 /// Min-price bands (Divine) for a harvest sweep. Each band fetches the cheapest
 /// HARVEST_SAMPLE listings at or above it, so together they span the price
-/// spectrum (cheapest-first search otherwise hides the expensive end).
-const PRICE_BANDS: [f64; 4] = [0.0, 5.0, 20.0, 50.0];
+/// spectrum (cheapest-first search otherwise hides the expensive end). The high
+/// bands (100/200/500) are what let the corpus + `/insights` see top-tier items —
+/// without them the corpus was blind above 50 div and learned nothing about what
+/// makes an item worth hundreds.
+const PRICE_BANDS: [f64; 7] = [0.0, 5.0, 20.0, 50.0, 100.0, 200.0, 500.0];
 /// Cheapest listings fetched per band.
 const HARVEST_SAMPLE: usize = 100;
 
