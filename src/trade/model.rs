@@ -38,6 +38,17 @@ pub struct Money {
     pub currency: Currency,
 }
 
+/// One explicit mod on a fetched listing, for the observation corpus.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ListingMod {
+    /// Normalised stat id, e.g. `explicit.stat_2768835289`.
+    pub stat_id: String,
+    /// Affix tier number (1 = best); parsed from the fetch `tier` string (`"P5"`→5).
+    pub tier: Option<u8>,
+    /// The displayed rolled value (first number of the mod description).
+    pub roll: Option<f64>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Listing {
     pub price: Money,
@@ -48,11 +59,9 @@ pub struct Listing {
     pub explicit_count: usize,
     /// Trade listing id (dedup key when pooling several searches).
     pub id: String,
-    /// Normalised explicit stat ids on the item (e.g. `explicit.stat_123`),
-    /// for matching against our query's `StatFilter.id`.
-    pub explicit_stat_ids: Vec<String>,
+    /// Per-mod enrichment for the observation corpus: stat id, tier, and roll.
+    pub mods: Vec<ListingMod>,
 }
-
 #[derive(Clone, Debug, PartialEq, Default, Serialize)]
 pub struct StatFilter {
     /// trade2 stat id, e.g. "explicit.stat_..." or "pseudo.pseudo_total_elemental_resistance".
@@ -192,7 +201,7 @@ mod tests {
             price_divine: 0.5,
             explicit_count: 0,
             id: String::new(),
-            explicit_stat_ids: vec![],
+            mods: vec![],
         };
         assert_eq!(l.price_divine, 0.5);
         assert!(matches!(l.price.currency, Currency::Exalted));
