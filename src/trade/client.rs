@@ -10,7 +10,7 @@ use serde_json::Value;
 use std::sync::{Arc, RwLock};
 
 use crate::trade::limiter::{Endpoint, RateLimiter};
-use crate::trade::model::{Currency, Listing, Money, SearchResponse, TradeQuery};
+use crate::trade::model::{Currency, Listing, ListingMod, Money, SearchResponse, TradeQuery};
 use crate::trade::query::to_payload;
 use crate::trade::rates::RateTable;
 use crate::trade::session::TradeSession;
@@ -56,31 +56,88 @@ fn affix_count(item: &Value) -> usize {
         .unwrap_or(0)
 }
 
-/// Normalised explicit stat ids for a fetched item: prefer
-/// `extended.hashes.explicit` (already `explicit.stat_*`), else strip the
-/// leading `stat.` from each `explicitMods[].hash`.
-fn explicit_stat_ids(item: &Value) -> Vec<String> {
+/// Parses a fetch `tier` string like `"P5"`/`"S3"` → `5`/`3`.
+fn parse_fetch_tier(t: &str) -> Option<u8> {
+    let digits: String = t.chars().filter(|c| c.is_ascii_digit()).collect();
+    digits.parse().ok()
+}
+
+/// First number in a mod description (the displayed roll), sign-preserving, e.g.
+/// "123% increased …" → 123.0; "Adds 5 to 10 …" → 5.0; "-12% to …" → -12.0.
+fn first_number(s: &str) -> Option<f64> {
+    let mut num = String::new();
+    let mut prev_dash = false;
+    for c in s.chars() {
+        if c.is_ascii_digit() {
+            if num.is_empty() && prev_dash {
+                num.push('-'); // preserve the sign of a negative roll
+            }
+            num.push(c);
+        } else if c == '.' && !num.is_empty() {
+            num.push(c);
+        } else if !num.is_empty() {
+            break;
+        } else {
+            prev_dash = c == '-';
+        }
+    }
+    num.parse().ok()
+}
+
+/// Per-listing explicit mods with stat id, tier, and rolled value. Stat id from
+/// `explicitMods[].hash` (strip the `stat.` prefix); tier from `mods[0].tier`;
+/// roll from the first number of the description.
+fn listing_mods(item: &Value) -> Vec<ListingMod> {
+    let mut mods: Vec<ListingMod> = item
+        .get("explicitMods")
+        .and_then(|m| m.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| {
+                    let hash = m.get("hash").and_then(|h| h.as_str())?;
+                    let stat_id = hash.strip_prefix("stat.").unwrap_or(hash).to_string();
+                    let tier = m
+                        .get("mods")
+                        .and_then(|x| x.as_array())
+                        .and_then(|a| a.first())
+                        .and_then(|m0| m0.get("tier"))
+                        .and_then(|t| t.as_str())
+                        .and_then(parse_fetch_tier);
+                    let roll = m
+                        .get("description")
+                        .and_then(|d| d.as_str())
+                        .and_then(first_number);
+                    Some(ListingMod {
+                        stat_id,
+                        tier,
+                        roll,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    // Fallback: include any stat ids in `extended.hashes.explicit` that the
+    // `explicitMods` entries didn't carry (e.g. display-string mods with no
+    // `hash`), with tier/roll unknown — so the corpus keeps the stat presence.
+    let known: std::collections::HashSet<String> = mods.iter().map(|m| m.stat_id.clone()).collect();
     if let Some(arr) = item
         .pointer("/extended/hashes/explicit")
         .and_then(|v| v.as_array())
     {
-        let ids: Vec<String> = arr
+        for id in arr
             .iter()
-            .filter_map(|pair| pair.get(0).and_then(|s| s.as_str()).map(String::from))
-            .collect();
-        if !ids.is_empty() {
-            return ids;
+            .filter_map(|pair| pair.get(0).and_then(|s| s.as_str()))
+        {
+            if !known.contains(id) {
+                mods.push(ListingMod {
+                    stat_id: id.to_string(),
+                    tier: None,
+                    roll: None,
+                });
+            }
         }
     }
-    item.get("explicitMods")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|m| m.get("hash").and_then(|h| h.as_str()))
-                .map(|h| h.strip_prefix("stat.").unwrap_or(h).to_string())
-                .collect()
-        })
-        .unwrap_or_default()
+    mods
 }
 
 /// Splits fetch hashes into comma-joined batches of at most `FETCH_BATCH` ids,
@@ -215,9 +272,7 @@ impl TradeClient {
                         }
                         let item = entry.get("item");
                         let explicit_count = item.map(affix_count).unwrap_or(0);
-                        // NB: `stat_ids` not `explicit_stat_ids` — avoid shadowing
-                        // the free `explicit_stat_ids` fn used on the same line.
-                        let stat_ids = item.map(explicit_stat_ids).unwrap_or_default();
+                        let mods = item.map(listing_mods).unwrap_or_default();
                         let id = entry
                             .get("id")
                             .and_then(|v| v.as_str())
@@ -232,7 +287,7 @@ impl TradeClient {
                             price_divine,
                             explicit_count,
                             id,
-                            explicit_stat_ids: stat_ids,
+                            mods,
                         })
                     })
                     .collect()
@@ -515,7 +570,8 @@ mod tests {
                 "listing": { "price": { "amount": 1.0, "currency": "divine" } },
                 "item": {
                     "explicitMods": [
-                        { "hash": "stat.explicit.stat_2768835289", "mods": [] }
+                        { "hash": "stat.explicit.stat_2768835289", "mods": [] },
+                        { "hash": "stat.explicit.stat_1050105434", "mods": [] }
                     ],
                     "extended": {
                         "hashes": { "explicit": [["explicit.stat_2768835289", [0]],
@@ -527,9 +583,10 @@ mod tests {
         let ls = client.parse_fetch(&v);
         assert_eq!(ls.len(), 1);
         assert_eq!(ls[0].id, "abc123");
-        // Prefer extended.hashes.explicit (both ids), already normalised.
+        // Both mods extracted via listing_mods.
+        let stat_ids: Vec<&str> = ls[0].mods.iter().map(|m| m.stat_id.as_str()).collect();
         assert_eq!(
-            ls[0].explicit_stat_ids,
+            stat_ids,
             vec!["explicit.stat_2768835289", "explicit.stat_1050105434"]
         );
     }
@@ -546,7 +603,85 @@ mod tests {
         });
         let ls = client.parse_fetch(&v);
         // "stat." prefix stripped to match StatFilter ids.
-        assert_eq!(ls[0].explicit_stat_ids, vec!["explicit.stat_999"]);
+        assert_eq!(ls[0].mods[0].stat_id, "explicit.stat_999");
+    }
+
+    #[test]
+    fn parse_fetch_extracts_mods_with_tier_and_roll() {
+        let client = test_client();
+        let v = serde_json::json!({
+            "result": [{
+                "id": "abc123",
+                "listing": { "price": { "amount": 1.0, "currency": "divine" } },
+                "item": {
+                    "explicitMods": [
+                        { "name": "Sadistic", "hash": "stat.explicit.stat_2768835289",
+                          "description": "123% increased Spell Physical Damage",
+                          "mods": [ { "tier": "P5", "magnitudes": [ { "min": "109", "max": "128" } ] } ] }
+                    ],
+                    "extended": { "hashes": { "explicit": [["explicit.stat_2768835289", [0]]] } }
+                }
+            }]
+        });
+        let ls = client.parse_fetch(&v);
+        assert_eq!(ls.len(), 1);
+        assert_eq!(ls[0].mods.len(), 1);
+        assert_eq!(ls[0].mods[0].stat_id, "explicit.stat_2768835289");
+        assert_eq!(ls[0].mods[0].tier, Some(5)); // "P5" → 5
+        assert_eq!(ls[0].mods[0].roll, Some(123.0)); // first number in the description
+    }
+
+    #[test]
+    fn first_number_preserves_sign() {
+        assert_eq!(
+            first_number("123% increased Spell Physical Damage"),
+            Some(123.0)
+        );
+        assert_eq!(first_number("+298 to maximum Mana"), Some(298.0));
+        assert_eq!(first_number("Adds 5 to 10 Physical Damage"), Some(5.0));
+        assert_eq!(first_number("-12% to Chaos Resistance"), Some(-12.0));
+        assert_eq!(first_number("1.5% of Damage Leeched"), Some(1.5));
+        assert_eq!(first_number("no digits here"), None);
+    }
+
+    #[test]
+    fn listing_mods_falls_back_to_extended_hashes() {
+        let client = test_client();
+        // One explicitMods entry has a hash (rich); a second stat id exists ONLY in
+        // extended.hashes.explicit (a display-string mod with no `hash`).
+        let v = serde_json::json!({
+            "result": [{
+                "id": "x",
+                "listing": { "price": { "amount": 1.0, "currency": "divine" } },
+                "item": {
+                    "explicitMods": [
+                        { "hash": "stat.explicit.stat_AAA", "description": "50% increased",
+                          "mods": [ { "tier": "P2" } ] }
+                    ],
+                    "extended": { "hashes": { "explicit": [
+                        ["explicit.stat_AAA", [0]],
+                        ["explicit.stat_BBB", [1]]
+                    ] } }
+                }
+            }]
+        });
+        let ls = client.parse_fetch(&v);
+        assert_eq!(ls.len(), 1);
+        // The rich mod (AAA) keeps its tier; the fallback mod (BBB) is captured
+        // stat-id-only so the corpus doesn't lose its presence.
+        let aaa = ls[0]
+            .mods
+            .iter()
+            .find(|m| m.stat_id == "explicit.stat_AAA")
+            .unwrap();
+        assert_eq!(aaa.tier, Some(2));
+        let bbb = ls[0]
+            .mods
+            .iter()
+            .find(|m| m.stat_id == "explicit.stat_BBB")
+            .unwrap();
+        assert_eq!(bbb.tier, None);
+        assert_eq!(bbb.roll, None);
     }
 
     #[test]
