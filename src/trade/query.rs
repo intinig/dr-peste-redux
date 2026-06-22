@@ -10,6 +10,8 @@ use crate::trade::stats::{StatCatalog, StatGroup};
 
 /// Band width as a fraction of the roll.
 const BAND_K: f64 = 0.5;
+/// Tighter band width for learned value-drivers.
+const BAND_K_DRIVER: f64 = 0.25;
 /// Your roll sits at this percentile of the band (0.2 = bottom 20%).
 const BAND_PCTL: f64 = 0.2;
 
@@ -19,6 +21,25 @@ fn band(v: f64) -> (Option<f64>, Option<f64>) {
     let lo = (v * (1.0 - BAND_PCTL * BAND_K)).round();
     let hi = (v * (1.0 + (1.0 - BAND_PCTL) * BAND_K)).round();
     (Some(lo), Some(hi))
+}
+
+/// Tighter band for learned value-drivers: keeps the price-defining combo
+/// constrained. With BAND_K_DRIVER=0.25, BAND_PCTL=0.2 → [0.95·v, 1.2·v].
+fn driver_band(v: f64) -> (Option<f64>, Option<f64>) {
+    let lo = (v * (1.0 - BAND_PCTL * BAND_K_DRIVER)).round();
+    let hi = (v * (1.0 + (1.0 - BAND_PCTL) * BAND_K_DRIVER)).round();
+    (Some(lo), Some(hi))
+}
+
+/// Relaxation strength for a normal (non-cornerstone) mod. Higher = kept longer.
+/// Trusted lift when known; otherwise a small cold-start score from the tier
+/// (stronger tier = higher), kept below trusted lifts so unknown mods relax
+/// first. Drivers (lift >= DRIVER_LIFT) naturally sort to the front of normals.
+fn mod_strength(trusted_lift: Option<f64>, tier: Option<u8>) -> f64 {
+    match trusted_lift {
+        Some(lift) => lift,
+        None => -1.0 - (tier.unwrap_or(u8::MAX) as f64) / 1000.0,
+    }
 }
 
 /// Cornerstone affixes are searched *exact* (min = roll, no max) because a worse
@@ -33,6 +54,7 @@ pub fn build_baseline(
     item: &ParsedItem,
     pseudo: &PseudoMap,
     catalog: &StatCatalog,
+    value: &crate::trade::value::ValueModel,
     league: &str,
 ) -> TradeQuery {
     // Only the item's explicit affixes drive value/comparable filters. Runes are
@@ -87,23 +109,46 @@ pub fn build_baseline(
         }
     }
 
+    // Learned value for this item's canonical category, only if trusted.
+    let cat_model = item
+        .item_class
+        .as_deref()
+        .map(crate::trade::value::canonical_category)
+        .and_then(|c| value.category(&c).cloned())
+        .filter(|m| m.sample_size >= crate::trade::value::MIN_CATEGORY_SAMPLE);
+
     // Per-mod explicit filters, tagged for ordering. Cornerstones are searched
-    // exact (min = roll, no max); everything else uses the loose band.
-    let mut mod_filters: Vec<(bool, Option<u8>, StatFilter)> = Vec::new();
+    // exact (min = roll, no max); everything else uses the loose band unless the
+    // category model identifies the stat as a value-driver (tighter band).
+    let mut mod_filters: Vec<(bool, f64, StatFilter)> = Vec::new();
     for m in &item.explicits {
         if pseudo.covers(&m.raw) {
             continue;
         }
         if let Some(id) = catalog.match_stat(&m.raw, StatGroup::Explicit) {
             let corner = is_cornerstone(&m.raw);
+            let stat_lift = cat_model.as_ref().and_then(|cm| {
+                cm.stats
+                    .iter()
+                    .find(|s| s.stat_id == id && s.count >= crate::trade::value::MIN_STAT_SAMPLE)
+                    .map(|s| s.lift)
+            });
+            let is_driver = stat_lift.is_some_and(|l| l >= crate::trade::value::DRIVER_LIFT);
             let (min, max) = if corner {
                 (m.value, None) // exact: at least this roll, no upper bound
+            } else if is_driver {
+                m.value.map(driver_band).unwrap_or((None, None))
             } else {
                 m.value.map(band).unwrap_or((None, None))
             };
+            let strength = if corner {
+                f64::INFINITY
+            } else {
+                mod_strength(stat_lift, m.tier)
+            };
             mod_filters.push((
                 corner,
-                m.tier,
+                strength,
                 StatFilter {
                     id,
                     label: m.raw.clone(),
@@ -115,11 +160,15 @@ pub fn build_baseline(
             tracing::debug!(item_mod = %m.raw, "no trade2 stat match; skipping filter");
         }
     }
-    // Order: cornerstones first (dropped last in relaxation), then normal mods
-    // strongest→weakest by tier (lower tier number = stronger; unknown tier =
-    // weakest, sorted last). `gather_comparables` pops the last stat, so the
-    // weakest normal mod is dropped first and cornerstones survive longest.
-    mod_filters.sort_by_key(|(corner, tier, _)| (!*corner, tier.unwrap_or(u8::MAX)));
+    // Order: cornerstones first (dropped last in relaxation). Among normals,
+    // strongest first (highest learned lift / tier score) so the weakest relaxes
+    // first; drivers, having the highest lift, sit at the front of the normals and
+    // survive longest before cornerstones. With an empty/untrusted model every
+    // normal falls to the tier-based cold-start score, reproducing today's order.
+    mod_filters.sort_by(|(ca, sa, _), (cb, sb, _)| {
+        cb.cmp(ca) // cornerstones (true) before normals (false)
+            .then(sb.partial_cmp(sa).unwrap_or(std::cmp::Ordering::Equal))
+    });
     // `stats` already holds the pseudo-aggregate filters; append the ordered mods
     // after them, but keep cornerstones ahead of pseudo so they're dropped last.
     let (corners, normals): (Vec<_>, Vec<_>) = mod_filters.into_iter().partition(|(c, _, _)| *c);
@@ -232,6 +281,7 @@ mod tests {
     use super::*;
     use crate::itemtext::{ItemStat, ParsedItem, Rarity};
     use crate::trade::pseudo::PseudoMap;
+
     fn ring() -> ParsedItem {
         ParsedItem {
             rarity: Rarity::Rare,
@@ -308,6 +358,7 @@ mod tests {
             &item,
             &PseudoMap::load(),
             &StatCatalog::default(),
+            &crate::trade::value::ValueModel::default(),
             "Standard",
         );
         let res_filters: Vec<_> = q
@@ -336,6 +387,7 @@ mod tests {
             &ring(),
             &PseudoMap::load(),
             &StatCatalog::default(),
+            &crate::trade::value::ValueModel::default(),
             "Standard",
         );
         assert_eq!(q.league, "Standard");
@@ -361,6 +413,7 @@ mod tests {
             &ring(),
             &PseudoMap::load(),
             &StatCatalog::default(),
+            &crate::trade::value::ValueModel::default(),
             "Standard",
         );
         let payload = to_payload(&q);
@@ -379,7 +432,13 @@ mod tests {
             affix: None,
             tier: None,
         });
-        let q = build_baseline(&item, &PseudoMap::load(), &catalog, "Standard");
+        let q = build_baseline(
+            &item,
+            &PseudoMap::load(),
+            &catalog,
+            &crate::trade::value::ValueModel::default(),
+            "Standard",
+        );
         // spell damage is non-pseudo → individual banded filter (round(0.9*80)=72, round(1.4*80)=112)
         let sd = q
             .stats
@@ -418,6 +477,7 @@ mod tests {
             &item,
             &PseudoMap::load(),
             &StatCatalog::default(),
+            &crate::trade::value::ValueModel::default(),
             "Standard",
         );
         let es = q.equipment.iter().find(|e| e.key == "es").unwrap();
@@ -451,6 +511,7 @@ mod tests {
             &item,
             &PseudoMap::load(),
             &StatCatalog::default(),
+            &crate::trade::value::ValueModel::default(),
             "Standard",
         );
         let payload = to_payload(&q);
@@ -506,6 +567,7 @@ mod tests {
             &item,
             &PseudoMap::load(),
             &StatCatalog::default(),
+            &crate::trade::value::ValueModel::default(),
             "Standard",
         );
         let ele = q
@@ -555,7 +617,13 @@ mod tests {
             }],
         };
         let catalog = StatCatalog::from_json(include_str!("fixtures/stats_sample.json")).unwrap();
-        let q = build_baseline(&item, &PseudoMap::load(), &catalog, "Standard");
+        let q = build_baseline(
+            &item,
+            &PseudoMap::load(),
+            &catalog,
+            &crate::trade::value::ValueModel::default(),
+            "Standard",
+        );
         // Only the explicit affix yields a filter (if the sample catalog matches it);
         // the rune and implicit never do.
         assert!(q
@@ -655,7 +723,13 @@ mod tests {
             ],
         };
         let catalog = StatCatalog::from_json(include_str!("fixtures/stats_sample.json")).unwrap();
-        let q = build_baseline(&item, &PseudoMap::load(), &catalog, "Standard");
+        let q = build_baseline(
+            &item,
+            &PseudoMap::load(),
+            &catalog,
+            &crate::trade::value::ValueModel::default(),
+            "Standard",
+        );
 
         // Cornerstone (movement speed) is searched exact: min set, no max.
         let ms = q
@@ -679,6 +753,229 @@ mod tests {
                 .enumerate()
                 .all(|(i, s)| s.label.contains("Movement Speed") || i > ms_idx),
             "cornerstone must precede all non-cornerstone filters"
+        );
+    }
+
+    /// Helper: returns the exact stat-id order build_baseline produces with an
+    /// empty model for `staff_item()` — a cornerstone (movement speed, tier 1)
+    /// followed by two normals (spell damage tier 2, rarity tier 3). With an empty
+    /// model, normals sort strongest→weakest by tier (lower tier number first),
+    /// so spell damage precedes rarity. Captured from the cold-start run before
+    /// value feedback was added; serves as the regression oracle for
+    /// `empty_model_reproduces_cold_start_query`.
+    fn expected_cold_start_order() -> Vec<&'static str> {
+        // cornerstone first (dropped last), then normals by tier ascending:
+        // movement speed (tier 1, cornerstone) → spell damage (tier 2) → rarity (tier 3).
+        vec![
+            "explicit.stat_movespeed",
+            "explicit.stat_spell_dmg",
+            "explicit.stat_rarity",
+        ]
+    }
+
+    /// Staff fixture with one cornerstone (movement speed) and two non-cornerstone
+    /// explicits — spell damage and increased rarity — all matched by the sample
+    /// stat catalog. The two normals let tests distinguish driver-vs-plain
+    /// relaxation order: spell damage is the seeded driver, rarity stays a plain
+    /// normal.
+    fn staff_item() -> ParsedItem {
+        ParsedItem {
+            rarity: Rarity::Rare,
+            name: "Onslaught Spell".into(),
+            base_type: Some("Chiming Staff".into()),
+            item_class: Some("Staves".into()),
+            item_level: Some(80),
+            quality: None,
+            corrupted: false,
+            energy_shield: None,
+            armour: None,
+            evasion: None,
+            implicits: vec![],
+            enchants: vec![],
+            runes: vec![],
+            explicits: vec![
+                ItemStat {
+                    raw: "35% increased Movement Speed".into(),
+                    value: Some(35.0),
+                    affix: Some(crate::itemtext::Affix::Prefix),
+                    tier: Some(1),
+                },
+                ItemStat {
+                    raw: "80% increased Spell Damage".into(),
+                    value: Some(80.0),
+                    affix: Some(crate::itemtext::Affix::Prefix),
+                    tier: Some(2),
+                },
+                ItemStat {
+                    raw: "20% increased Rarity of Items found".into(),
+                    value: Some(20.0),
+                    affix: Some(crate::itemtext::Affix::Suffix),
+                    tier: Some(3),
+                },
+            ],
+        }
+    }
+
+    /// Build a ValueModel where `driver_stat_id` is a strong value driver for the
+    /// staff category: ≥MIN_CATEGORY_SAMPLE observations, the driver appears in
+    /// ≥MIN_STAT_SAMPLE of them at high price, giving lift ≥DRIVER_LIFT. Items
+    /// without the driver stat have a low base price; items with it have a high
+    /// price. Observations log the clipboard-plural category text ("Staves"), so
+    /// they round-trip through `canonical_category` ("Staves" → "Staff") exactly
+    /// like real harvest/paste data and like the item under test (item_class
+    /// "Staves") — a future divergence in that mapping would break this test.
+    fn seed_staff_model_with_driver(driver_stat_id: &str) -> crate::trade::value::ValueModel {
+        use crate::observe::{Observation, Source};
+        use crate::trade::model::ListingMod;
+        use crate::trade::value::MIN_CATEGORY_SAMPLE;
+
+        let mut obs: Vec<Observation> = Vec::new();
+
+        // Category logged as the clipboard-plural "Staves"; `ValueModel::build`
+        // folds it through `canonical_category` to "Staff".
+        // Background: 35 cheap staves without the driver (price 1.0 each).
+        for i in 0..35 {
+            obs.push(Observation {
+                timestamp_unix: i,
+                league: "Standard".into(),
+                base_type: Some("Chiming Staff".into()),
+                category: Some("Staves".into()),
+                mods: vec![ListingMod {
+                    stat_id: "explicit.stat_cast_speed".into(),
+                    tier: None,
+                    roll: None,
+                }],
+                price_divine: 1.0,
+                source: Source::Harvest,
+            });
+        }
+
+        // Driver group: 20 expensive staves WITH the driver stat (price 10.0 each).
+        // This gives: count=20 >= MIN_STAT_SAMPLE(15),
+        //   median_with ≈ 10.0, median_without ≈ 1.0,
+        //   lift = 10.0 / 1.0 = 10.0 >= DRIVER_LIFT(1.5). ✓
+        for i in 35..55 {
+            obs.push(Observation {
+                timestamp_unix: i,
+                league: "Standard".into(),
+                base_type: Some("Chiming Staff".into()),
+                category: Some("Staves".into()),
+                mods: vec![ListingMod {
+                    stat_id: driver_stat_id.into(),
+                    tier: None,
+                    roll: None,
+                }],
+                price_divine: 10.0,
+                source: Source::Harvest,
+            });
+        }
+
+        // sample_size = 55 >= MIN_CATEGORY_SAMPLE(50). ✓
+        assert!(obs.len() >= MIN_CATEGORY_SAMPLE);
+        crate::trade::value::ValueModel::build(&obs)
+    }
+
+    #[test]
+    fn empty_model_reproduces_cold_start_query() {
+        let catalog = StatCatalog::from_json(include_str!("fixtures/stats_sample.json")).unwrap();
+        let item = staff_item();
+        let pseudo = PseudoMap::load();
+        let empty = crate::trade::value::ValueModel::default();
+
+        let q = build_baseline(&item, &pseudo, &catalog, &empty, "Standard");
+
+        // Same stat ids, same order, same bands as the pre-feedback baseline.
+        // Cornerstone first (dropped last), then normal strongest→weakest by tier.
+        let ids: Vec<&str> = q.stats.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, expected_cold_start_order());
+
+        // Bands are the wide defaults (not driver-tightened).
+        let spell = q
+            .stats
+            .iter()
+            .find(|s| s.id == "explicit.stat_spell_dmg")
+            .unwrap();
+        // band(80.0): lo = round(0.9 * 80) = 72, hi = round(1.4 * 80) = 112
+        assert_eq!(spell.min, Some(72.0));
+        assert_eq!(spell.max, Some(112.0));
+    }
+
+    #[test]
+    fn trusted_model_makes_drivers_survive_and_tighten() {
+        let catalog = StatCatalog::from_json(include_str!("fixtures/stats_sample.json")).unwrap();
+        let item = staff_item();
+        let pseudo = PseudoMap::load();
+
+        // Build a model where spell_dmg is a strong driver for the Staff category.
+        let model = seed_staff_model_with_driver("explicit.stat_spell_dmg");
+
+        let q = build_baseline(&item, &pseudo, &catalog, &model, "Standard");
+
+        let driver = q
+            .stats
+            .iter()
+            .find(|s| s.id == "explicit.stat_spell_dmg")
+            .expect("driver stat must be present in query");
+
+        // Driver uses the tight band: driver_band(80.0): lo = round(0.95 * 80) = 76, hi = round(1.2 * 80) = 96
+        assert_eq!(driver.min, Some(76.0), "driver should use tight lo band");
+        assert_eq!(driver.max, Some(96.0), "driver should use tight hi band");
+
+        // Ratio check: tight band gives hi/lo < 1.35
+        let ratio = driver.max.unwrap() / driver.min.unwrap();
+        assert!(
+            ratio < 1.35,
+            "driver should use the tight band, got ratio {ratio}"
+        );
+
+        // The plain (non-driver) normal — increased rarity — is absent from the
+        // seeded model, so it keeps the LOOSE default band, distinguishing the two
+        // band tiers.
+        let plain = q
+            .stats
+            .iter()
+            .find(|s| s.id == "explicit.stat_rarity")
+            .expect("plain normal stat must be present in query");
+        // band(20.0): lo = round(0.9 * 20) = 18, hi = round(1.4 * 20) = 28
+        assert_eq!(
+            plain.min,
+            Some(18.0),
+            "plain normal should use loose lo band"
+        );
+        assert_eq!(
+            plain.max,
+            Some(28.0),
+            "plain normal should use loose hi band"
+        );
+        let plain_ratio = plain.max.unwrap() / plain.min.unwrap();
+        assert!(
+            plain_ratio > 1.4,
+            "plain normal should use the loose band, got ratio {plain_ratio}"
+        );
+
+        // Ordering: cornerstone first (dropped last), then among normals the driver
+        // outranks the plain normal — proving the value-driver survives relaxation
+        // LONGER than a plain mod (gather_comparables drops the last stat first).
+        let corner_pos = q
+            .stats
+            .iter()
+            .position(|s| s.id == "explicit.stat_movespeed")
+            .unwrap();
+        let driver_pos = q
+            .stats
+            .iter()
+            .position(|s| s.id == "explicit.stat_spell_dmg")
+            .unwrap();
+        let plain_pos = q
+            .stats
+            .iter()
+            .position(|s| s.id == "explicit.stat_rarity")
+            .unwrap();
+        assert!(driver_pos > corner_pos, "cornerstone must precede driver");
+        assert!(
+            driver_pos < plain_pos,
+            "driver (pos {driver_pos}) must outrank plain normal (pos {plain_pos}) \
+             so it relaxes later"
         );
     }
 }

@@ -108,17 +108,6 @@ async fn main() -> Result<()> {
             trade::categories::CategoryCatalog::default()
         }
     };
-    let pricer = std::sync::Arc::new(TradePricer::new(
-        trade_client,
-        PseudoMap::load(),
-        catalog,
-        ObservationLog::new(&config.observation_log_path),
-    ));
-    let sessions = std::sync::Arc::new(crate::trade::session::MemberSessions::new(
-        config.proxy.clone(),
-        std::time::Duration::from_secs(config.session_ttl_mins * 60),
-    ));
-
     let value = std::sync::Arc::new(std::sync::RwLock::new(ValueModel::default()));
     rebuild_into(&ObservationLog::new(&config.observation_log_path), &value); // startup build
     spawn_value_refresher(
@@ -126,6 +115,18 @@ async fn main() -> Result<()> {
         value.clone(),
         Duration::from_secs(VALUE_REFRESH_MINS * 60),
     );
+
+    let pricer = std::sync::Arc::new(TradePricer::new(
+        trade_client,
+        PseudoMap::load(),
+        catalog,
+        ObservationLog::new(&config.observation_log_path),
+        value.clone(),
+    ));
+    let sessions = std::sync::Arc::new(crate::trade::session::MemberSessions::new(
+        config.proxy.clone(),
+        std::time::Duration::from_secs(config.session_ttl_mins * 60),
+    ));
 
     // Best-effort initial refresh so commands have data quickly.
     if let Err(e) = refresh_once(&client, &store, &rates).await {
