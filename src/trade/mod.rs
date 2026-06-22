@@ -52,6 +52,10 @@ pub struct TradePricer<C: Comparables> {
 }
 
 impl<C: Comparables> TradePricer<C> {
+    /// Read access to the stat catalog (for /insights label resolution).
+    pub fn catalog(&self) -> &StatCatalog {
+        &self.catalog
+    }
     pub fn new(
         comparables: C,
         pseudo: PseudoMap,
