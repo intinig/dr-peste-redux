@@ -376,6 +376,7 @@ mod tests {
             price_divine: divine,
             explicit_count: 0,
             id: String::new(),
+            base_type: None,
             mods: vec![],
         }
     }
@@ -389,6 +390,7 @@ mod tests {
             price_divine: divine,
             explicit_count,
             id: String::new(),
+            base_type: None,
             mods: vec![],
         }
     }
@@ -931,6 +933,7 @@ mod tests {
                 price_divine: divine,
                 explicit_count: 1,
                 id: id.to_string(),
+                base_type: None,
                 mods: vec![],
             }
         }

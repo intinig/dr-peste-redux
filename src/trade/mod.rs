@@ -108,7 +108,7 @@ impl<C: Comparables> TradePricer<C> {
             let obs = Observation {
                 timestamp_unix,
                 league: league.to_string(),
-                base_type: item.base_type.clone(),
+                base_type: l.base_type.clone().or_else(|| item.base_type.clone()),
                 category: item.item_class.clone(),
                 mods: l.mods.clone(),
                 price_divine: l.price_divine,
@@ -151,6 +151,7 @@ mod tests {
                     price_divine: self.0,
                     explicit_count: 0,
                     id: format!("flat-{i}"),
+                    base_type: None,
                     mods: vec![],
                 })
                 .collect())
@@ -190,6 +191,7 @@ mod tests {
             price_divine: divine,
             explicit_count: ec,
             id: id.to_string(),
+            base_type: None,
             mods: vec![],
         }
     }

@@ -273,6 +273,10 @@ impl TradeClient {
                         let item = entry.get("item");
                         let explicit_count = item.map(affix_count).unwrap_or(0);
                         let mods = item.map(listing_mods).unwrap_or_default();
+                        let base_type = item
+                            .and_then(|it| it.get("baseType"))
+                            .and_then(|b| b.as_str())
+                            .map(String::from);
                         let id = entry
                             .get("id")
                             .and_then(|v| v.as_str())
@@ -287,6 +291,7 @@ impl TradeClient {
                             price_divine,
                             explicit_count,
                             id,
+                            base_type,
                             mods,
                         })
                     })
@@ -682,6 +687,21 @@ mod tests {
             .unwrap();
         assert_eq!(bbb.tier, None);
         assert_eq!(bbb.roll, None);
+    }
+
+    #[test]
+    fn parse_fetch_extracts_base_type() {
+        let client = test_client();
+        let v = serde_json::json!({
+            "result": [{
+                "id": "abc",
+                "listing": { "price": { "amount": 1.0, "currency": "divine" } },
+                "item": { "baseType": "Chiming Staff", "explicitMods": [] }
+            }]
+        });
+        let ls = client.parse_fetch(&v);
+        assert_eq!(ls.len(), 1);
+        assert_eq!(ls[0].base_type.as_deref(), Some("Chiming Staff"));
     }
 
     #[test]

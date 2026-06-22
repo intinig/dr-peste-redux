@@ -59,6 +59,9 @@ pub struct Listing {
     pub explicit_count: usize,
     /// Trade listing id (dedup key when pooling several searches).
     pub id: String,
+    /// The listed item's base type (e.g. "Chiming Staff"), from the fetch
+    /// `item.baseType`. The corpus join key across paste and harvest.
+    pub base_type: Option<String>,
     /// Per-mod enrichment for the observation corpus: stat id, tier, and roll.
     pub mods: Vec<ListingMod>,
 }
@@ -193,6 +196,7 @@ mod tests {
             price_divine: 0.5,
             explicit_count: 0,
             id: String::new(),
+            base_type: None,
             mods: vec![],
         };
         assert_eq!(l.price_divine, 0.5);
