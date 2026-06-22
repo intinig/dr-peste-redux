@@ -60,10 +60,12 @@ impl<C: Comparables> TradePricer<C> {
         session: &TradeSession,
     ) -> Result<PriceEstimate> {
         let query = build_baseline(item, &self.pseudo, &self.catalog, league);
-        // Relax up to the number of stat filters so the query can broaden all the
-        // way to the bare base if needed; build_baseline ordered them weakest-last
-        // so relaxation drops the weakest affix first and cornerstones last.
-        let max_relax = query.stats.len();
+        // Relax up to the number of stat + equipment filters so the query can
+        // broaden all the way to the bare base if needed (gather_comparables drops
+        // stat filters first, then equipment bands); build_baseline ordered the
+        // stats weakest-last so relaxation drops the weakest affix first and
+        // cornerstones last.
+        let max_relax = query.stats.len() + query.equipment.len();
         let est = price_check(&self.comparables, &query, PRICE_SAMPLE, max_relax, session).await?;
         self.record(&query, &est);
         Ok(est)

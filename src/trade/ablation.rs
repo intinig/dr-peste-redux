@@ -117,10 +117,17 @@ pub async fn estimate<C: Comparables + ?Sized>(
     Ok(est)
 }
 
-/// Relax-and-read price-check: gather comparables (relaxing the query, weakest
-/// affix first, until `MIN_COMPARABLES` exist or `max_relax` is hit), then read
-/// p20/p50/p80 over the cheapest matches. No craftability filter — the query
-/// constraint plus the cheapest-first read define the comparable set. Never empty.
+/// Relax-and-read price-check, reading p20/p50/p80 over the cheapest matches.
+/// No craftability filter — the query constraint plus the cheapest-first read
+/// define the comparable set.
+///
+/// Exact-first: the full constraint is searched with no relaxation; if it yields
+/// `≥ MIN_COMPARABLES` it is a precise comparable set (`CraftTier`, confidence by
+/// count). Only when the exact query is too thin do we relax (weakest affix
+/// first, up to `max_relax`) and price that broader set as `BroadMarket` (low
+/// confidence) — so a fully-relaxed bare-base fallback is never presented as a
+/// precise match. The estimate may be empty (`listing_count == 0`) when a base
+/// has no live listings at all; callers surface that as a thin-market result.
 pub async fn price_check<C: Comparables + ?Sized>(
     c: &C,
     query: &TradeQuery,
@@ -128,13 +135,16 @@ pub async fn price_check<C: Comparables + ?Sized>(
     max_relax: usize,
     session: &TradeSession,
 ) -> Result<PriceEstimate> {
-    let listings = c.comparables(query, limit, max_relax, session).await?;
-    let basis = if listings.len() >= MIN_COMPARABLES {
-        EstimateBasis::CraftTier
-    } else {
-        EstimateBasis::BroadMarket
-    };
-    Ok(estimate_from(&listings, basis))
+    // Exact (no relaxation): a full-constraint match with enough comparables is
+    // precise and deserves count-based confidence.
+    let exact = c.comparables(query, limit, 0, session).await?;
+    if exact.len() >= MIN_COMPARABLES {
+        return Ok(estimate_from(&exact, EstimateBasis::CraftTier));
+    }
+    // Too thin at full constraint → relax and price the broader set, but keep it
+    // on the low-confidence broad-market path regardless of how many it returns.
+    let relaxed = c.comparables(query, limit, max_relax, session).await?;
+    Ok(estimate_from(&relaxed, EstimateBasis::BroadMarket))
 }
 
 /// Linear-interpolation percentile of an ascending-sorted slice. `p` in [0,1].
@@ -833,8 +843,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn price_check_relaxes_then_reads_percentiles() {
-        // Fake returns few for the full query, enough once relaxed.
+    async fn price_check_relaxed_result_is_broad_market_low_confidence() {
+        // Exact (max_relax=0) is thin (2); relaxing yields a healthy set (12).
+        // The relaxed result must NOT be presented as a precise CraftTier match —
+        // it is BroadMarket with Low confidence (the fully-relaxed fallback).
         struct Relaxer;
         #[async_trait]
         impl Comparables for Relaxer {
@@ -845,7 +857,6 @@ mod tests {
                 max_relax: usize,
                 _s: &TradeSession,
             ) -> anyhow::Result<Vec<Listing>> {
-                // Mimic gather: with relaxation available, return a healthy set.
                 let n = if max_relax > 0 { 12 } else { 2 };
                 Ok((0..n).map(|i| listing(2.0 + i as f64)).collect())
             }
@@ -854,7 +865,32 @@ mod tests {
         let est = price_check(&Relaxer, &q, 40, q.stats.len(), &TradeSession::for_test())
             .await
             .unwrap();
-        assert_eq!(est.basis, EstimateBasis::CraftTier);
+        assert_eq!(est.basis, EstimateBasis::BroadMarket);
+        assert_eq!(est.confidence, Confidence::Low);
         assert!(est.low <= est.typical && est.typical <= est.high);
+    }
+
+    #[tokio::test]
+    async fn price_check_exact_match_is_craft_tier() {
+        // The full constraint already yields >= MIN_COMPARABLES → precise set,
+        // priced as CraftTier (count-based confidence), no relaxation needed.
+        struct Plenty;
+        #[async_trait]
+        impl Comparables for Plenty {
+            async fn comparables(
+                &self,
+                _q: &TradeQuery,
+                _l: usize,
+                _max_relax: usize,
+                _s: &TradeSession,
+            ) -> anyhow::Result<Vec<Listing>> {
+                Ok((0..12).map(|i| listing(2.0 + i as f64)).collect())
+            }
+        }
+        let q = two_stat_query();
+        let est = price_check(&Plenty, &q, 40, q.stats.len(), &TradeSession::for_test())
+            .await
+            .unwrap();
+        assert_eq!(est.basis, EstimateBasis::CraftTier);
     }
 }
