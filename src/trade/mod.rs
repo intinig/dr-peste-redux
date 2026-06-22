@@ -2,6 +2,7 @@
 //! `poeninja`/`store`: data flows discord → trade, never sideways.
 
 pub mod ablation;
+pub mod categories;
 pub mod client;
 pub mod limiter;
 pub mod model;

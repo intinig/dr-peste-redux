@@ -84,6 +84,16 @@ async fn main() -> Result<()> {
             trade::stats::StatCatalog::default()
         }
     };
+    let category_catalog = match trade::categories::CategoryCatalog::fetch(&trade_client).await {
+        Ok(c) => {
+            tracing::info!(categories = c.all().len(), "loaded trade2 category catalog");
+            c
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to fetch category catalog; /harvest autocomplete empty");
+            trade::categories::CategoryCatalog::default()
+        }
+    };
     let pricer = std::sync::Arc::new(TradePricer::new(
         trade_client,
         PseudoMap::load(),
@@ -112,6 +122,7 @@ async fn main() -> Result<()> {
             commands: vec![
                 discord::price::price(),
                 discord::farm::farm(),
+                discord::harvest::harvest(),
                 discord::paste::paste(),
                 discord::logout::logout(),
                 discord::help::help(),
@@ -129,6 +140,7 @@ async fn main() -> Result<()> {
                     pricer,
                     rates,
                     sessions,
+                    categories: category_catalog,
                 })
             })
         })

@@ -1,0 +1,9 @@
+{ "result": [ { "id": "type_filters", "title": "Type Filters", "filters": [
+  { "id": "category", "text": "Item Category", "option": { "options": [
+    { "id": null, "text": "Any" },
+    { "id": "weapon.staff", "text": "Staff" },
+    { "id": "weapon.warstaff", "text": "Quarterstaff" },
+    { "id": "armour.helmet", "text": "Helmet" },
+    { "id": "accessory.amulet", "text": "Amulet" }
+  ] } }
+] } ] }

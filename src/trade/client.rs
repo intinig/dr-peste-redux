@@ -340,6 +340,19 @@ impl TradeClient {
             .text()
             .await?)
     }
+
+    /// Fetches the raw `data/filters` taxonomy JSON.
+    pub async fn fetch_filters_raw(&self) -> Result<String> {
+        let url = format!("{TRADE_BASE}/data/filters");
+        Ok(self
+            .send_with_retry(&self.default_limiter, Endpoint::Fetch, || {
+                self.http.get(&url)
+            })
+            .await
+            .context("trade2 data/filters failed")?
+            .text()
+            .await?)
+    }
 }
 
 #[async_trait]
