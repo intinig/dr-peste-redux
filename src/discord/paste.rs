@@ -90,11 +90,10 @@ async fn price_rare(
     parsed: &itemtext::ParsedItem,
     league: &League,
 ) -> Result<(), Error> {
-    let uid = ctx.author().id.get();
-    if let Some(session) = ctx.data().sessions.session_for(uid) {
-        return run_pricing(ctx, parsed, league, &session).await;
-    }
-    prompt_connect(ctx, parsed, league).await
+    let Some(session) = ensure_session(ctx).await? else {
+        return Ok(()); // user dismissed / timed out / invalid (already messaged)
+    };
+    run_pricing(ctx, parsed, league, &session).await
 }
 
 async fn run_pricing(
@@ -204,14 +203,19 @@ async fn run_pricing(
     Ok(())
 }
 
-async fn prompt_connect(
+/// Ensures the member has a captured POESESSID, prompting inline (the connect
+/// button + POESESSID modal) if not. Returns the live session, or `None` if the
+/// member dismissed/timed out or the cookie was invalid/unreachable (those cases
+/// are messaged to the member). Shared by `/paste` and `/harvest`.
+pub(crate) async fn ensure_session(
     ctx: &Context<'_>,
-    parsed: &itemtext::ParsedItem,
-    league: &League,
-) -> Result<(), Error> {
+) -> Result<Option<crate::trade::session::TradeSession>, Error> {
     use poise::serenity_prelude as serenity;
 
     let uid = ctx.author().id.get();
+    if let Some(session) = ctx.data().sessions.session_for(uid) {
+        return Ok(Some(session));
+    }
 
     let button = serenity::CreateButton::new("drp_connect")
         .label("🔑 Connect your PoE account")
@@ -222,7 +226,7 @@ async fn prompt_connect(
             poise::CreateReply::default()
                 .ephemeral(true)
                 .content(
-                    "To price rares I search the trade site as **you**. \n\
+                    "To search the trade site as **you**, connect your account. \n\
                      Click below and paste your **POESESSID** (pathofexile.com cookie). \n\
                      It's kept in memory only, used solely for your searches, and you can remove it any time with `/logout`. \n\
                      Privacy: https://drp.pme.it/privacy",
@@ -245,11 +249,11 @@ async fn prompt_connect(
             .edit(
                 *ctx,
                 poise::CreateReply::default()
-                    .content("Connect timed out — run `/paste` again when ready.")
+                    .content("Connect timed out — run the command again when ready.")
                     .components(vec![]),
             )
             .await?;
-        return Ok(());
+        return Ok(None);
     };
 
     // Open the POESESSID modal off the component interaction.
@@ -261,41 +265,35 @@ async fn prompt_connect(
     )
     .await?;
 
+    // Helper: clear the now-stale connect button and show a terminal status on
+    // the original ephemeral message, so a dead button isn't left behind.
+    let finish = |content: &'static str| {
+        reply.edit(
+            *ctx,
+            poise::CreateReply::default()
+                .content(content)
+                .components(vec![]),
+        )
+    };
+
     let Some(modal) = submitted else {
-        return Ok(()); // member dismissed the modal
+        finish("Connect cancelled — run the command again when ready.").await?;
+        return Ok(None);
     };
 
     if !valid_poesessid(&modal.poesessid) {
-        ctx.send(poise::CreateReply::default().ephemeral(true).content("That doesn't look like a POESESSID (expected 32 hex chars). Run `/paste` and try again."))
-            .await?;
-        return Ok(());
+        finish("That doesn't look like a POESESSID (expected 32 hex chars). Run the command again and try once more.").await?;
+        return Ok(None);
     }
 
     let cookie = secrecy::SecretString::new(modal.poesessid.trim().to_string());
     if let Err(e) = ctx.data().sessions.store(uid, cookie).await {
         tracing::warn!(error = %e, "session store/validation failed"); // never logs the cookie
-        ctx.send(
-            poise::CreateReply::default()
-                .ephemeral(true)
-                .content("Couldn't reach the trade site — please try `/paste` again in a moment."),
-        )
-        .await?;
-        return Ok(());
+        finish("Couldn't reach the trade site — please try again in a moment.").await?;
+        return Ok(None);
     }
 
-    // Session stored; price the item now using the in-scope parsed item.
-    match ctx.data().sessions.session_for(uid) {
-        Some(session) => run_pricing(ctx, parsed, league, &session).await,
-        None => {
-            ctx.send(
-                poise::CreateReply::default()
-                    .ephemeral(true)
-                    .content("Connected — run `/paste` again to price your item."),
-            )
-            .await?;
-            Ok(())
-        }
-    }
+    Ok(ctx.data().sessions.session_for(uid))
 }
 
 fn format_not_found(name: &str, league: &League) -> String {

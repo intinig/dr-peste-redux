@@ -46,13 +46,11 @@ pub async fn harvest(
         return Ok(());
     };
 
-    let uid = ctx.author().id.get();
-    let Some(session) = data.sessions.session_for(uid) else {
-        ctx.say(
-            "Connect your PoE account first (run `/paste` once to set your POESESSID), then retry `/harvest`.",
-        )
-        .await?;
-        return Ok(());
+    // Reuse the shared connect dialog: ensure_session fast-paths an existing
+    // session and otherwise prompts for the POESESSID inline (same button + modal
+    // as /paste), rather than dead-ending to a "go run /paste" message.
+    let Some(session) = crate::discord::paste::ensure_session(&ctx).await? else {
+        return Ok(()); // user dismissed / timed out / invalid (already messaged)
     };
 
     let reply = ctx
@@ -67,10 +65,17 @@ pub async fn harvest(
         .await
     {
         Ok(n) => {
-            crate::trade::value::rebuild_into(
-                &crate::observe::ObservationLog::new(&data.config.observation_log_path),
-                &data.value,
-            );
+            // Rebuild the value model off the async executor — a whole-corpus
+            // read + aggregation shouldn't block the runtime worker thread.
+            let log_path = data.config.observation_log_path.clone();
+            let value = data.value.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                crate::trade::value::rebuild_into(
+                    &crate::observe::ObservationLog::new(&log_path),
+                    &value,
+                );
+            })
+            .await;
             reply
                 .edit(
                     ctx,
