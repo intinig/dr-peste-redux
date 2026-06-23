@@ -36,9 +36,6 @@ pub struct RateRule {
     pub restriction: u32,
 }
 
-/// Filled prefix+suffix affix count for a fetched item, hybrid-safe, from the
-/// best signal the trade2 fetch response carries:
-/// `extended.prefixes+suffixes` → `extended.mods.explicit` → `explicitMods` → 0.
 /// True if the item has veiled/unrevealed mods. trade2 exposes only slot
 /// placeholders (e.g. `["Prefix02"]`) for these — no stat data — so the item's
 /// real mod set is unknown and it can't be a valid observation or comparable.
@@ -49,6 +46,9 @@ fn has_veiled_mods(item: &Value) -> bool {
         .unwrap_or(false)
 }
 
+/// Filled prefix+suffix affix count for a fetched item, hybrid-safe, from the
+/// best signal the trade2 fetch response carries:
+/// `extended.prefixes+suffixes` → `extended.mods.explicit` → `explicitMods` → 0.
 fn affix_count(item: &Value) -> usize {
     if let Some(ext) = item.get("extended") {
         let p = ext.get("prefixes").and_then(|v| v.as_u64());
@@ -280,7 +280,9 @@ impl TradeClient {
                         let price = listing.get("price")?;
                         let amount = price.get("amount")?.as_f64()?;
                         let code = price.get("currency")?.as_str()?;
-                        let rates = self.rates.read().unwrap();
+                        // Recover from a poisoned lock rather than panic — pricing
+                        // and capture must survive an unrelated thread's panic.
+                        let rates = self.rates.read().unwrap_or_else(|e| e.into_inner());
                         // Drop listings in currencies we can't convert to divine
                         // (e.g. "aug"); pricing them at 0 would poison the estimate.
                         let price_divine = rates.to_divine(amount, code)?;
