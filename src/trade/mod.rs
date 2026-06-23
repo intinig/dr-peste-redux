@@ -129,6 +129,11 @@ impl<C: Comparables> TradePricer<C> {
             .map(|d| d.as_secs())
             .unwrap_or(0);
         for l in listings {
+            // Skip listings whose mods we couldn't capture — an observation with no
+            // mods can't inform the value model (it's noise in the corpus).
+            if l.mods.is_empty() {
+                continue;
+            }
             let obs = Observation {
                 timestamp_unix,
                 league: league.to_string(),
@@ -140,6 +145,7 @@ impl<C: Comparables> TradePricer<C> {
                 mods: l.mods.clone(),
                 price_divine: l.price_divine,
                 source: Source::Paste,
+                indexed: l.indexed.clone(),
             };
             if let Err(e) = self.log.append(&obs) {
                 tracing::warn!(error = %e, "failed to append observation");
@@ -204,6 +210,10 @@ impl<C: Comparables + crate::trade::client::TradeApi> TradePricer<C> {
                 if !l.id.is_empty() && !seen.insert(l.id.clone()) {
                     continue; // already logged this listing from an earlier band
                 }
+                // Skip listings with no captured mods — they can't inform learning.
+                if l.mods.is_empty() {
+                    continue;
+                }
                 let obs = Observation {
                     timestamp_unix,
                     league: league.to_string(),
@@ -212,6 +222,7 @@ impl<C: Comparables + crate::trade::client::TradeApi> TradePricer<C> {
                     mods: l.mods.clone(),
                     price_divine: l.price_divine,
                     source: Source::Harvest,
+                    indexed: l.indexed.clone(),
                 };
                 if self.log.append(&obs).is_ok() {
                     logged += 1;
@@ -256,7 +267,12 @@ mod tests {
                     explicit_count: 0,
                     id: format!("flat-{i}"),
                     base_type: None,
-                    mods: vec![],
+                    mods: vec![crate::trade::model::ListingMod {
+                        stat_id: "explicit.stat_x".into(),
+                        tier: None,
+                        roll: None,
+                    }],
+                    indexed: None,
                 })
                 .collect())
         }
@@ -296,7 +312,12 @@ mod tests {
             explicit_count: ec,
             id: id.to_string(),
             base_type: None,
-            mods: vec![],
+            mods: vec![crate::trade::model::ListingMod {
+                stat_id: "explicit.stat_x".into(),
+                tier: None,
+                roll: None,
+            }],
+            indexed: None,
         }
     }
 
@@ -466,6 +487,7 @@ mod tests {
                             tier: Some(1),
                             roll: Some(50.0),
                         }],
+                        indexed: None,
                     })
                     .collect())
             }
@@ -552,7 +574,12 @@ mod tests {
                         explicit_count: 1,
                         id: h.clone(),
                         base_type: Some("Chiming Staff".into()),
-                        mods: vec![],
+                        mods: vec![crate::trade::model::ListingMod {
+                            stat_id: "explicit.stat_x".into(),
+                            tier: None,
+                            roll: None,
+                        }],
+                        indexed: None,
                     })
                     .collect())
             }

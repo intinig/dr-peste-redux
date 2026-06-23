@@ -24,6 +24,11 @@ pub(crate) const USER_AGENT: &str =
 /// batches its hashes into groups of this size.
 const FETCH_BATCH: usize = 10;
 
+/// Listings priced at or above this fraction of a Mirror of Kalandra's divine
+/// value are dropped: prices in the mirror tier are almost always troll/placeholder
+/// listings, not real offers, and they skew the corpus and price reads.
+const MIRROR_EXCLUDE_FRAC: f64 = 0.8;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct RateRule {
     pub max: u32,
@@ -34,6 +39,16 @@ pub struct RateRule {
 /// Filled prefix+suffix affix count for a fetched item, hybrid-safe, from the
 /// best signal the trade2 fetch response carries:
 /// `extended.prefixes+suffixes` → `extended.mods.explicit` → `explicitMods` → 0.
+/// True if the item has veiled/unrevealed mods. trade2 exposes only slot
+/// placeholders (e.g. `["Prefix02"]`) for these — no stat data — so the item's
+/// real mod set is unknown and it can't be a valid observation or comparable.
+fn has_veiled_mods(item: &Value) -> bool {
+    item.get("veiledMods")
+        .and_then(|v| v.as_array())
+        .map(|a| !a.is_empty())
+        .unwrap_or(false)
+}
+
 fn affix_count(item: &Value) -> usize {
     if let Some(ext) = item.get("extended") {
         let p = ext.get("prefixes").and_then(|v| v.as_u64());
@@ -261,21 +276,44 @@ impl TradeClient {
             .map(|arr| {
                 arr.iter()
                     .filter_map(|entry| {
-                        let price = entry.get("listing")?.get("price")?;
+                        let listing = entry.get("listing")?;
+                        let price = listing.get("price")?;
                         let amount = price.get("amount")?.as_f64()?;
                         let code = price.get("currency")?.as_str()?;
+                        let rates = self.rates.read().unwrap();
                         // Drop listings in currencies we can't convert to divine
                         // (e.g. "aug"); pricing them at 0 would poison the estimate.
-                        let price_divine = self.rates.read().unwrap().to_divine(amount, code)?;
+                        let price_divine = rates.to_divine(amount, code)?;
                         if price_divine <= 0.0 {
                             return None;
                         }
+                        // Drop mirror-tier listings (≥ MIRROR_EXCLUDE_FRAC of a
+                        // Mirror's divine value) — almost always troll/placeholder
+                        // prices, not real offers.
+                        if let Some(mirror) = rates.to_divine(1.0, "mirror") {
+                            if mirror > 0.0 && price_divine >= MIRROR_EXCLUDE_FRAC * mirror {
+                                return None;
+                            }
+                        }
+                        drop(rates);
                         let item = entry.get("item");
-                        let explicit_count = item.map(affix_count).unwrap_or(0);
+                        // Drop listings with veiled/unrevealed mods — their stats
+                        // aren't exposed, so the item is unknown (not a valid
+                        // comparable or observation). Zero-mod listings are kept here
+                        // (still valid price points); the corpus filters them at
+                        // logging time instead.
+                        if item.map(has_veiled_mods).unwrap_or(false) {
+                            return None;
+                        }
                         let mods = item.map(listing_mods).unwrap_or_default();
+                        let explicit_count = item.map(affix_count).unwrap_or(0);
                         let base_type = item
                             .and_then(|it| it.get("baseType"))
                             .and_then(|b| b.as_str())
+                            .map(String::from);
+                        let indexed = listing
+                            .get("indexed")
+                            .and_then(|s| s.as_str())
                             .map(String::from);
                         let id = entry
                             .get("id")
@@ -293,6 +331,7 @@ impl TradeClient {
                             id,
                             base_type,
                             mods,
+                            indexed,
                         })
                     })
                     .collect()
@@ -655,6 +694,72 @@ mod tests {
         assert_eq!(ls[0].mods[0].stat_id, "explicit.stat_2768835289");
         assert_eq!(ls[0].mods[0].tier, Some(5)); // "P5" → 5
         assert_eq!(ls[0].mods[0].roll, Some(123.0)); // first number in the description
+    }
+
+    #[test]
+    fn parse_fetch_drops_veiled_listings() {
+        let client = test_client();
+        let v = serde_json::json!({
+            "result": [
+                // Veiled: only a slot placeholder, real mods hidden → drop (unknown item).
+                { "id": "veiled",
+                  "listing": { "price": { "amount": 50.0, "currency": "divine" } },
+                  "item": {
+                      "explicitMods": [ { "hash": "stat.explicit.stat_1" } ],
+                      "veiledMods": ["Prefix02", "Suffix06"]
+                  }
+                },
+                // Normal item → kept.
+                { "id": "ok",
+                  "listing": { "price": { "amount": 50.0, "currency": "divine" } },
+                  "item": { "explicitMods": [ { "hash": "stat.explicit.stat_2" } ] }
+                }
+            ]
+        });
+        let ls = client.parse_fetch(&v);
+        assert_eq!(ls.len(), 1);
+        assert_eq!(ls[0].id, "ok");
+    }
+
+    #[test]
+    fn parse_fetch_drops_mirror_tier_listings() {
+        // Mirror = 100 div → exclude listings priced >= 80 div (0.8 * mirror).
+        let client = TradeClient::new(
+            None,
+            std::sync::Arc::new(std::sync::RwLock::new(crate::trade::rates::RateTable::new(
+                std::collections::HashMap::from([
+                    ("divine".to_string(), 1.0),
+                    ("mirror".to_string(), 100.0),
+                ]),
+            ))),
+        )
+        .unwrap();
+        let v = serde_json::json!({
+            "result": [
+                { "id": "fake", "listing": { "price": { "amount": 80.0, "currency": "divine" } },
+                  "item": { "explicitMods": [ { "hash": "stat.explicit.stat_2" } ] } },
+                { "id": "real", "listing": { "price": { "amount": 79.0, "currency": "divine" } },
+                  "item": { "explicitMods": [ { "hash": "stat.explicit.stat_2" } ] } }
+            ]
+        });
+        let ls = client.parse_fetch(&v);
+        assert_eq!(ls.len(), 1);
+        assert_eq!(ls[0].id, "real");
+    }
+
+    #[test]
+    fn parse_fetch_captures_listing_indexed() {
+        let client = test_client();
+        let v = serde_json::json!({
+            "result": [{
+                "id": "x",
+                "listing": { "indexed": "2026-06-22T10:00:00Z",
+                             "price": { "amount": 1.0, "currency": "divine" } },
+                "item": { "explicitMods": [ { "hash": "stat.explicit.stat_2" } ] }
+            }]
+        });
+        let ls = client.parse_fetch(&v);
+        assert_eq!(ls[0].indexed.as_deref(), Some("2026-06-22T10:00:00Z"));
     }
 
     #[test]

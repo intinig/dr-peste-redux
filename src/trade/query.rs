@@ -847,6 +847,7 @@ mod tests {
                 }],
                 price_divine: 1.0,
                 source: Source::Harvest,
+                indexed: None,
             });
         }
 
@@ -867,6 +868,7 @@ mod tests {
                 }],
                 price_divine: 10.0,
                 source: Source::Harvest,
+                indexed: None,
             });
         }
 

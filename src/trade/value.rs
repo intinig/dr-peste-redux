@@ -455,6 +455,7 @@ mod tests {
                 .collect(),
             price_divine: price,
             source: Source::Harvest,
+            indexed: None,
         }
     }
 
