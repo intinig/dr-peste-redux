@@ -243,24 +243,24 @@ impl<C: Comparables + crate::trade::client::TradeApi> TradePricer<C> {
             // The API returned fewer ids than matched → this band is under-covered;
             // bisect (within the value range, up to the depth cap) rather than settle
             // for its cheapest 100.
-            if (resp.total as usize) > resp.hashes.len()
-                && hi.is_some()
-                && lo >= SUBBAND_VALUE_FLOOR
-                && depth < MAX_SUBBAND_DEPTH
-            {
-                let hi_v = hi.unwrap();
-                let mid = (lo * hi_v).sqrt(); // geometric: finer where prices cluster
-                if mid > lo && mid < hi_v {
-                    tracing::info!(
-                        band_lo = lo,
-                        band_hi = hi_v,
-                        total = resp.total,
-                        depth,
-                        "harvest band split"
-                    );
-                    stack.push((mid, hi, depth + 1));
-                    stack.push((lo, Some(mid), depth + 1));
-                    continue;
+            if let Some(hi_v) = hi {
+                if resp.total > resp.hashes.len() as u64
+                    && lo >= SUBBAND_VALUE_FLOOR
+                    && depth < MAX_SUBBAND_DEPTH
+                {
+                    let mid = (lo * hi_v).sqrt(); // geometric: finer where prices cluster
+                    if mid > lo && mid < hi_v {
+                        tracing::info!(
+                            band_lo = lo,
+                            band_hi = hi_v,
+                            total = resp.total,
+                            depth,
+                            "harvest band split"
+                        );
+                        stack.push((mid, hi, depth + 1));
+                        stack.push((lo, Some(mid), depth + 1));
+                        continue;
+                    }
                 }
             }
             let sampled = stride_sample(&resp.hashes, HARVEST_SAMPLE);
