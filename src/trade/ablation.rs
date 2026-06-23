@@ -54,16 +54,35 @@ pub async fn gather_comparables<A: TradeApi + ?Sized>(
 ) -> Result<Vec<Listing>> {
     let mut q = query.clone();
     let mut relaxations = 0;
+    // One clock read per call keeps freshness decisions consistent across the
+    // deep-fetch walk and any relaxations (and avoids repeated syscalls).
+    let now = now_unix();
     loop {
         let resp = api.search(&q, session).await?;
-        let take = resp.hashes.len().min(limit);
-        let mut listings = api.fetch(&resp.id, &resp.hashes[..take], session).await?;
-        // Drop stale listings: old postings are weakly/incorrectly priced (corpus
-        // age EDA — the active market is the <2-week window). They must neither
-        // distort the estimate nor count toward `min_matches`; a thin *fresh* set
-        // should relax further rather than settle for stale comparables.
-        let now = now_unix();
-        listings.retain(|l| is_fresh_at(l.indexed.as_deref(), now, MAX_LISTING_AGE_DAYS));
+        // Collect the cheapest `limit` *fresh* listings, fetching progressively
+        // deeper into the price-sorted results when the cheap prefix is stale.
+        // Stale listings are disproportionately cheap dregs (corpus age EDA), so the
+        // cheapest `limit` hashes can be all-stale while fresh matches sit just above
+        // them — fetching only that prefix then dropping stale would make a tight
+        // query look empty and wrongly relax to a broader, cheaper market. Walking
+        // in `limit`-sized windows stops at the first window for a healthy market
+        // (same cost as before) and only digs when the cheap tail is stale.
+        let mut listings: Vec<Listing> = Vec::new();
+        let mut cursor = 0;
+        while listings.len() < limit && cursor < resp.hashes.len() {
+            let end = (cursor + limit).min(resp.hashes.len());
+            let batch = api
+                .fetch(&resp.id, &resp.hashes[cursor..end], session)
+                .await?;
+            listings.extend(
+                batch
+                    .into_iter()
+                    .filter(|l| is_fresh_at(l.indexed.as_deref(), now, MAX_LISTING_AGE_DAYS)),
+            );
+            cursor = end;
+        }
+        // Accumulated in price-ascending hash order; keep the cheapest `limit` fresh.
+        listings.truncate(limit);
         listings.sort_by(|a, b| {
             a.price_divine
                 .partial_cmp(&b.price_divine)
@@ -533,6 +552,58 @@ mod tests {
             .unwrap();
         assert_eq!(got.len(), 1, "ancient listing dropped, undated kept");
         assert_eq!(got[0].price_divine, 20.0);
+    }
+
+    #[tokio::test]
+    async fn gather_comparables_fetches_past_stale_prefix() {
+        // Search returns 20 price-sorted hashes: the cheapest 10 are stale dregs,
+        // the next 10 are fresh. With limit=10, naively fetching the cheapest 10 then
+        // dropping stale would yield nothing and wrongly relax/empty. gather must dig
+        // deeper into the same result and return the fresh comparables.
+        struct DeepApi;
+        #[async_trait]
+        impl TradeApi for DeepApi {
+            async fn search(
+                &self,
+                _q: &TradeQuery,
+                _s: &TradeSession,
+            ) -> anyhow::Result<SearchResponse> {
+                let mut hashes: Vec<String> = (0..10).map(|i| format!("old{i}")).collect();
+                hashes.extend((0..10).map(|i| format!("new{i}")));
+                Ok(SearchResponse {
+                    id: "qid".into(),
+                    total: 20,
+                    hashes,
+                })
+            }
+            async fn fetch(
+                &self,
+                _id: &str,
+                h: &[String],
+                _s: &TradeSession,
+            ) -> anyhow::Result<Vec<Listing>> {
+                Ok(h.iter()
+                    .map(|id| {
+                        let mut l = listing(10.0);
+                        l.id = id.clone();
+                        if id.starts_with("old") {
+                            l.indexed = Some("2000-01-01T00:00:00Z".into()); // stale
+                        }
+                        // "new" → indexed None → fresh
+                        l
+                    })
+                    .collect())
+            }
+        }
+        let got = gather_comparables(&DeepApi, &q_with(0), 10, 0, 1, &TradeSession::for_test())
+            .await
+            .unwrap();
+        assert_eq!(
+            got.len(),
+            10,
+            "fresh comparables found past the stale cheap prefix"
+        );
+        assert!(got.iter().all(|l| l.id.starts_with("new")));
     }
 
     #[tokio::test]

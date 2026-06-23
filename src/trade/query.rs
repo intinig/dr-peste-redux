@@ -687,6 +687,26 @@ mod tests {
     }
 
     #[test]
+    fn to_payload_emits_max_only_price_band() {
+        // Harvest's first band is lo=0 (no min) with hi=Some(..) → a max-only filter.
+        let q = TradeQuery {
+            league: "L".into(),
+            category: Some("weapon.staff".into()),
+            type_line: None,
+            stats: vec![],
+            misc: MiscFilters::default(),
+            equipment: vec![],
+            min_price_divine: None,
+            max_price_divine: Some(5.0),
+        };
+        let p = to_payload(&q);
+        let price = &p["query"]["filters"]["trade_filters"]["filters"]["price"];
+        assert_eq!(price["max"], 5.0);
+        assert_eq!(price["option"], "divine");
+        assert!(price.get("min").is_none());
+    }
+
+    #[test]
     fn to_payload_omits_price_when_none() {
         let q = TradeQuery {
             league: "L".into(),

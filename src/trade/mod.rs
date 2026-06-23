@@ -60,7 +60,15 @@ fn stride_sample<T: Clone>(items: &[T], n: usize) -> Vec<T> {
     if items.len() <= n {
         return items.to_vec();
     }
-    (0..n).map(|k| items[k * items.len() / n].clone()).collect()
+    if n == 1 {
+        return vec![items[0].clone()];
+    }
+    // Evenly spaced indices spanning [0, len-1] inclusive, so both the cheap floor
+    // (k=0) and the expensive top of the band (k=n-1 → last item) are represented.
+    let last = items.len() - 1;
+    (0..n)
+        .map(|k| items[(k * last + (n - 1) / 2) / (n - 1)].clone())
+        .collect()
 }
 
 pub struct TradePricer<C: Comparables> {
@@ -643,9 +651,10 @@ mod tests {
     fn stride_sample_spreads_evenly_across_range() {
         let v: Vec<usize> = (0..100).collect();
         let s = stride_sample(&v, 10);
-        assert_eq!(s, vec![0, 10, 20, 30, 40, 50, 60, 70, 80, 90]);
-        // reaches the expensive end of the band, not just the cheap floor
-        assert!(*s.last().unwrap() >= 90);
+        assert_eq!(s, vec![0, 11, 22, 33, 44, 55, 66, 77, 88, 99]);
+        // spans both ends: the cheap floor AND the most expensive item in the band
+        assert_eq!(s[0], 0);
+        assert_eq!(*s.last().unwrap(), 99);
     }
 
     #[test]
