@@ -382,6 +382,7 @@ mod tests {
             id: String::new(),
             base_type: None,
             mods: vec![],
+            indexed: None,
         }
     }
 
@@ -396,6 +397,7 @@ mod tests {
             id: String::new(),
             base_type: None,
             mods: vec![],
+            indexed: None,
         }
     }
 
@@ -1008,6 +1010,7 @@ mod tests {
                 id: id.to_string(),
                 base_type: None,
                 mods: vec![],
+                indexed: None,
             }
         }
         struct ExactThin;

@@ -64,6 +64,9 @@ pub struct Listing {
     pub base_type: Option<String>,
     /// Per-mod enrichment for the observation corpus: stat id, tier, and roll.
     pub mods: Vec<ListingMod>,
+    /// When the listing was posted (`listing.indexed`, ISO-8601). Lets the
+    /// corpus/analysis down-weight stale, economy-drifted prices. `None` if absent.
+    pub indexed: Option<String>,
 }
 #[derive(Clone, Debug, PartialEq, Default, Serialize)]
 pub struct StatFilter {
@@ -201,6 +204,7 @@ mod tests {
             id: String::new(),
             base_type: None,
             mods: vec![],
+            indexed: None,
         };
         assert_eq!(l.price_divine, 0.5);
         assert!(matches!(l.price.currency, Currency::Exalted));

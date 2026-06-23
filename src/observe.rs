@@ -22,6 +22,7 @@ pub enum Source {
 /// One real market listing, captured for the learning corpus.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Observation {
+    /// When WE captured this observation (unix seconds).
     pub timestamp_unix: u64,
     pub league: String,
     pub base_type: Option<String>,
@@ -29,6 +30,10 @@ pub struct Observation {
     pub mods: Vec<ListingMod>,
     pub price_divine: f64,
     pub source: Source,
+    /// When the listing was posted (`listing.indexed`, ISO-8601), if known —
+    /// for staleness analysis (old posts drift from the current economy).
+    #[serde(default)]
+    pub indexed: Option<String>,
 }
 
 /// Append-only JSONL log of observations. Mutex-guarded; failures are returned,
@@ -95,6 +100,7 @@ mod tests {
             }],
             price_divine: price,
             source: Source::Paste,
+            indexed: None,
         }
     }
 
