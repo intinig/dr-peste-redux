@@ -2,6 +2,7 @@
 //! `poeninja`/`store`: data flows discord → trade, never sideways.
 
 pub mod ablation;
+pub mod age;
 pub mod categories;
 pub mod client;
 pub mod limiter;
@@ -37,15 +38,30 @@ const COMPARABLE_SAMPLE: usize = 100;
 const PRICE_SAMPLE: usize = 40;
 /// Number of characteristics to ablate in a breakdown.
 const TOP_K: usize = 4;
-/// Min-price bands (Divine) for a harvest sweep. Each band fetches the cheapest
-/// HARVEST_SAMPLE listings at or above it, so together they span the price
-/// spectrum (cheapest-first search otherwise hides the expensive end). The high
-/// bands (100/200/500) are what let the corpus + `/insights` see top-tier items —
-/// without them the corpus was blind above 50 div and learned nothing about what
-/// makes an item worth hundreds.
+/// Price-band edges (Divine) for a harvest sweep. Consecutive edges define
+/// disjoint bands `[lo, hi)` (the last open-ended), each searched with both a
+/// min and max price so the band is a true slice of the market. Within a band,
+/// listings are sampled evenly across the price-sorted results (`stride_sample`)
+/// rather than taking the cheapest prefix — otherwise the sweep just re-collects
+/// the global cheap end and the corpus stays blind to the roll/tier value curves
+/// that distinguish a 50-div staff from a 500-div one.
 const PRICE_BANDS: [f64; 7] = [0.0, 5.0, 20.0, 50.0, 100.0, 200.0, 500.0];
-/// Cheapest listings fetched per band.
+/// Listings sampled per band (evenly spaced across the band's price range).
 const HARVEST_SAMPLE: usize = 100;
+
+/// Picks up to `n` evenly-spaced items from `items` (which the trade2 search
+/// returns sorted by price ascending). Returns all items when `items.len() <= n`.
+/// Striding — rather than taking the cheapest `n` prefix — keeps the sample
+/// representative across the whole price band instead of skewed to its floor.
+fn stride_sample<T: Clone>(items: &[T], n: usize) -> Vec<T> {
+    if n == 0 {
+        return Vec::new();
+    }
+    if items.len() <= n {
+        return items.to_vec();
+    }
+    (0..n).map(|k| items[k * items.len() / n].clone()).collect()
+}
 
 pub struct TradePricer<C: Comparables> {
     comparables: C,
@@ -167,13 +183,16 @@ impl<C: Comparables + crate::trade::client::TradeApi> TradePricer<C> {
         session: &TradeSession,
     ) -> Result<usize> {
         let mut logged = 0usize;
-        // Bands overlap when a category has fewer than HARVEST_SAMPLE listings
-        // below the next threshold (the min-only lower band then re-fetches the
-        // higher band's items). Dedup by listing id across bands so the corpus
-        // isn't skewed toward the same high-priced items. Empty ids can't be
-        // deduped, so they're always logged.
+        // Disjoint, bounded price bands `[lo, hi)` (last open-ended). Bounding each
+        // band by max — and sampling evenly across the price-sorted results rather
+        // than taking the cheapest prefix — keeps each band's sample representative
+        // across its whole range instead of repeatedly oversampling the global cheap
+        // end. Dedup by listing id across bands so a boundary item appearing in two
+        // adjacent bands is logged once; empty ids can't be deduped, so are always
+        // logged.
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for band in PRICE_BANDS {
+        for (i, &lo) in PRICE_BANDS.iter().enumerate() {
+            let hi = PRICE_BANDS.get(i + 1).copied();
             let q = crate::trade::model::TradeQuery {
                 league: league.to_string(),
                 category: Some(category_id.to_string()),
@@ -181,31 +200,33 @@ impl<C: Comparables + crate::trade::client::TradeApi> TradePricer<C> {
                 stats: vec![],
                 misc: crate::trade::model::MiscFilters::default(),
                 equipment: vec![],
-                min_price_divine: if band > 0.0 { Some(band) } else { None },
+                min_price_divine: if lo > 0.0 { Some(lo) } else { None },
+                max_price_divine: hi,
             };
             let resp = match self.comparables.search(&q, session).await {
                 Ok(r) => r,
                 Err(e) => {
-                    tracing::warn!(error = %e, band, "harvest band search failed; skipping");
+                    tracing::warn!(error = %e, band_lo = lo, "harvest band search failed; skipping");
                     continue;
                 }
             };
-            let take = resp.hashes.len().min(HARVEST_SAMPLE);
-            let listings = match self
-                .comparables
-                .fetch(&resp.id, &resp.hashes[..take], session)
-                .await
-            {
+            let sampled = stride_sample(&resp.hashes, HARVEST_SAMPLE);
+            tracing::info!(
+                band_lo = lo,
+                band_hi = ?hi,
+                total = resp.total,
+                returned = resp.hashes.len(),
+                sampled = sampled.len(),
+                "harvest band"
+            );
+            let listings = match self.comparables.fetch(&resp.id, &sampled, session).await {
                 Ok(l) => l,
                 Err(e) => {
-                    tracing::warn!(error = %e, band, "harvest band fetch failed; skipping");
+                    tracing::warn!(error = %e, band_lo = lo, "harvest band fetch failed; skipping");
                     continue;
                 }
             };
-            let timestamp_unix = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
+            let timestamp_unix = crate::trade::age::now_unix();
             for l in &listings {
                 if !l.id.is_empty() && !seen.insert(l.id.clone()) {
                     continue; // already logged this listing from an earlier band
@@ -609,5 +630,26 @@ mod tests {
         assert_eq!(n, 1 + PRICE_BANDS.len());
         let body = std::fs::read_to_string(&path).unwrap();
         assert_eq!(body.lines().count(), 1 + PRICE_BANDS.len());
+    }
+
+    #[test]
+    fn stride_sample_returns_all_when_not_larger_than_n() {
+        let v = vec![1, 2, 3];
+        assert_eq!(stride_sample(&v, 5), vec![1, 2, 3]);
+        assert_eq!(stride_sample(&v, 3), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn stride_sample_spreads_evenly_across_range() {
+        let v: Vec<usize> = (0..100).collect();
+        let s = stride_sample(&v, 10);
+        assert_eq!(s, vec![0, 10, 20, 30, 40, 50, 60, 70, 80, 90]);
+        // reaches the expensive end of the band, not just the cheap floor
+        assert!(*s.last().unwrap() >= 90);
+    }
+
+    #[test]
+    fn stride_sample_zero_is_empty() {
+        assert!(stride_sample::<i32>(&[1, 2, 3], 0).is_empty());
     }
 }

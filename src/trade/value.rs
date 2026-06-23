@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::sync::RwLock;
 
 use crate::observe::{Observation, ObservationLog};
+use crate::trade::age::{is_fresh_at, now_unix, MAX_LISTING_AGE_DAYS};
 
 /// A category needs at least this many listings before it is "trusted" for
 /// pricing feedback (insights still renders a thin-data note below it).
@@ -146,10 +147,17 @@ impl ValueModel {
     }
 }
 
-/// Rebuilds the ValueModel from the corpus and swaps it into `slot`. Best-effort:
-/// reads are corrupt-line-tolerant; a poisoned lock is recovered, never panicked.
 pub fn rebuild_into(log: &ObservationLog, slot: &RwLock<ValueModel>) {
-    let model = ValueModel::build(&log.read_all());
+    // Learn only from fresh observations: stale postings (old listing age) are
+    // weakly/incorrectly priced and would bias the learned value-drivers. Undated
+    // legacy rows are kept (we can't date them — see `is_fresh_at`).
+    let now = now_unix();
+    let fresh: Vec<Observation> = log
+        .read_all()
+        .into_iter()
+        .filter(|o| is_fresh_at(o.indexed.as_deref(), now, MAX_LISTING_AGE_DAYS))
+        .collect();
+    let model = ValueModel::build(&fresh);
     let n: usize = model.leagues.values().map(HashMap::len).sum();
     *slot.write().unwrap_or_else(|e| e.into_inner()) = model;
     tracing::info!(categories = n, "value model rebuilt");
@@ -457,6 +465,40 @@ mod tests {
             source: Source::Harvest,
             indexed: None,
         }
+    }
+
+    #[test]
+    fn rebuild_into_drops_stale_observations() {
+        // 20 fresh + 5 ancient rows in one category. rebuild_into must learn only
+        // from the fresh ones, so the ancient (stale-priced) rows can't bias drivers
+        // or inflate the sample.
+        let dir = tempfile::tempdir().unwrap();
+        let log = ObservationLog::new(dir.path().join("obs.jsonl"));
+        for _ in 0..20 {
+            log.append(&Observation {
+                indexed: Some("2099-01-01T00:00:00Z".into()), // future → always fresh
+                ..ob("Staff", 10.0, &["explicit.a"])
+            })
+            .unwrap();
+        }
+        for _ in 0..5 {
+            log.append(&Observation {
+                indexed: Some("2000-01-01T00:00:00Z".into()), // ancient → always stale
+                ..ob("Staff", 999.0, &["explicit.a"])
+            })
+            .unwrap();
+        }
+        let slot = RwLock::new(ValueModel::default());
+        rebuild_into(&log, &slot);
+        let model = slot.read().unwrap();
+        let cat = model
+            .category("Standard", "Staff")
+            .expect("Staff category present");
+        assert_eq!(
+            cat.sample_size, 20,
+            "only fresh rows counted; ancient dropped"
+        );
+        assert_eq!(cat.base_median, 10.0, "ancient 999-div outliers excluded");
     }
 
     #[test]

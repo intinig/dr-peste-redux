@@ -205,6 +205,7 @@ pub fn build_baseline(
         },
         equipment,
         min_price_divine: None,
+        max_price_divine: None,
     }
 }
 
@@ -268,9 +269,15 @@ pub fn to_payload(q: &TradeQuery) -> Value {
     if let Some(t) = &q.type_line {
         query["type"] = json!(t);
     }
-    if let Some(min) = q.min_price_divine {
-        query["filters"]["trade_filters"] =
-            json!({ "filters": { "price": { "min": min, "option": "divine" } } });
+    if q.min_price_divine.is_some() || q.max_price_divine.is_some() {
+        let mut price = json!({ "option": "divine" });
+        if let Some(min) = q.min_price_divine {
+            price["min"] = json!(min);
+        }
+        if let Some(max) = q.max_price_divine {
+            price["max"] = json!(max);
+        }
+        query["filters"]["trade_filters"] = json!({ "filters": { "price": price } });
     }
 
     json!({ "query": query, "sort": { "price": "asc" } })
@@ -647,6 +654,7 @@ mod tests {
             misc: MiscFilters::default(),
             equipment: vec![],
             min_price_divine: Some(20.0),
+            max_price_divine: None,
         };
         let p = to_payload(&q);
         assert_eq!(
@@ -660,6 +668,25 @@ mod tests {
     }
 
     #[test]
+    fn to_payload_emits_min_and_max_price_band() {
+        let q = TradeQuery {
+            league: "L".into(),
+            category: Some("weapon.staff".into()),
+            type_line: None,
+            stats: vec![],
+            misc: MiscFilters::default(),
+            equipment: vec![],
+            min_price_divine: Some(20.0),
+            max_price_divine: Some(50.0),
+        };
+        let p = to_payload(&q);
+        let price = &p["query"]["filters"]["trade_filters"]["filters"]["price"];
+        assert_eq!(price["min"], 20.0);
+        assert_eq!(price["max"], 50.0);
+        assert_eq!(price["option"], "divine");
+    }
+
+    #[test]
     fn to_payload_omits_price_when_none() {
         let q = TradeQuery {
             league: "L".into(),
@@ -669,6 +696,7 @@ mod tests {
             misc: MiscFilters::default(),
             equipment: vec![],
             min_price_divine: None,
+            max_price_divine: None,
         };
         let p = to_payload(&q);
         assert!(p["query"]["filters"].get("trade_filters").is_none());

@@ -4,6 +4,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
+use crate::trade::age::{is_fresh_at, now_unix, MAX_LISTING_AGE_DAYS};
 use crate::trade::client::TradeApi;
 use crate::trade::model::{
     AblationKind, Breakdown, Confidence, Contribution, Currency, EstimateBasis, Listing,
@@ -43,13 +44,6 @@ const TRIM_MIN_N: usize = 8;
 /// to work with. The price-check path overrides this with `1` (tightest non-empty).
 pub(crate) const MIN_COMPARABLES: usize = 10;
 
-/// Searches + fetches up to `limit` cheapest listings, relaxing the query (drops
-/// the last stat filter, then the last equipment band, up to `max_relax` times)
-/// until it has at least `min_matches` comparables. With `min_matches == 1` this is
-/// the tightest query that returns *any* match. Because `build_baseline` orders the
-/// strongest mods first and relaxation pops from the end, the value-defining mods
-/// survive longest — so the returned set is the closest comparables, never an
-/// over-broadened cheap-market sample. Returns whatever it has (possibly empty).
 pub async fn gather_comparables<A: TradeApi + ?Sized>(
     api: &A,
     query: &TradeQuery,
@@ -64,6 +58,12 @@ pub async fn gather_comparables<A: TradeApi + ?Sized>(
         let resp = api.search(&q, session).await?;
         let take = resp.hashes.len().min(limit);
         let mut listings = api.fetch(&resp.id, &resp.hashes[..take], session).await?;
+        // Drop stale listings: old postings are weakly/incorrectly priced (corpus
+        // age EDA — the active market is the <2-week window). They must neither
+        // distort the estimate nor count toward `min_matches`; a thin *fresh* set
+        // should relax further rather than settle for stale comparables.
+        let now = now_unix();
+        listings.retain(|l| is_fresh_at(l.indexed.as_deref(), now, MAX_LISTING_AGE_DAYS));
         listings.sort_by(|a, b| {
             a.price_divine
                 .partial_cmp(&b.price_divine)
@@ -474,6 +474,7 @@ mod tests {
             misc: MiscFilters::default(),
             equipment: vec![],
             min_price_divine: None,
+            max_price_divine: None,
         }
     }
 
@@ -494,6 +495,44 @@ mod tests {
             1,
             "searched once; no relaxation"
         );
+    }
+
+    #[tokio::test]
+    async fn gather_comparables_drops_stale_listings() {
+        // The fetch returns one listing indexed years ago (datable-stale) and one
+        // with no timestamp (undatable → kept). gather must drop only the stale one,
+        // so old postings can't distort the estimate or satisfy `min_matches`.
+        struct AgeApi;
+        #[async_trait]
+        impl TradeApi for AgeApi {
+            async fn search(
+                &self,
+                _q: &TradeQuery,
+                _s: &TradeSession,
+            ) -> anyhow::Result<SearchResponse> {
+                Ok(SearchResponse {
+                    id: "qid".into(),
+                    total: 2,
+                    hashes: vec!["a".into(), "b".into()],
+                })
+            }
+            async fn fetch(
+                &self,
+                _id: &str,
+                _h: &[String],
+                _s: &TradeSession,
+            ) -> anyhow::Result<Vec<Listing>> {
+                let mut ancient = listing(10.0);
+                ancient.indexed = Some("2000-01-01T00:00:00Z".into());
+                let undated = listing(20.0); // indexed: None → kept
+                Ok(vec![ancient, undated])
+            }
+        }
+        let got = gather_comparables(&AgeApi, &q_with(0), 10, 0, 1, &TradeSession::for_test())
+            .await
+            .unwrap();
+        assert_eq!(got.len(), 1, "ancient listing dropped, undated kept");
+        assert_eq!(got[0].price_divine, 20.0);
     }
 
     #[tokio::test]
@@ -682,6 +721,7 @@ mod tests {
             misc: MiscFilters::default(),
             equipment: vec![],
             min_price_divine: None,
+            max_price_divine: None,
         }
     }
 
@@ -919,6 +959,7 @@ mod tests {
             misc: MiscFilters::default(),
             equipment: vec![],
             min_price_divine: None,
+            max_price_divine: None,
         };
         let url = trade_url(&q);
         assert!(

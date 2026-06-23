@@ -105,6 +105,11 @@ pub struct TradeQuery {
     /// Minimum listing price in Divine for a price-banded search (harvest only;
     /// `None` for normal pricing searches).
     pub min_price_divine: Option<f64>,
+    /// Maximum listing price in Divine for a price-banded search (harvest only;
+    /// `None` for normal pricing searches). With `min_price_divine` this bounds a
+    /// band to `[min, max]` so within-band sampling is representative rather than
+    /// skewed to the global cheap end.
+    pub max_price_divine: Option<f64>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
