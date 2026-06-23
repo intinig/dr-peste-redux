@@ -48,6 +48,14 @@ const TOP_K: usize = 4;
 const PRICE_BANDS: [f64; 7] = [0.0, 5.0, 20.0, 50.0, 100.0, 200.0, 500.0];
 /// Listings sampled per band (evenly spaced across the band's price range).
 const HARVEST_SAMPLE: usize = 100;
+/// Adaptive sub-banding only kicks in at/above this price (Divine). Below it the
+/// market is cheap junk pinned to the round-number floor — not worth extra queries
+/// to resolve. The value-bearing mid-tier (≈20–200 div) and up gets bisected so the
+/// trade2 100-result cap doesn't hide everything above each band's floor.
+const SUBBAND_VALUE_FLOOR: f64 = 20.0;
+/// Max recursive bisections of one band. Bounds harvest cost (a band expands to at
+/// most 2^depth leaves) and the finest price resolution (band_width / 2^depth).
+const MAX_SUBBAND_DEPTH: usize = 3;
 
 /// Picks up to `n` evenly-spaced items from `items` (which the trade2 search
 /// returns sorted by price ascending). Returns all items when `items.len() <= n`.
@@ -198,9 +206,23 @@ impl<C: Comparables + crate::trade::client::TradeApi> TradePricer<C> {
         // end. Dedup by listing id across bands so a boundary item appearing in two
         // adjacent bands is logged once; empty ids can't be deduped, so are always
         // logged.
+        let timestamp_unix = crate::trade::age::now_unix();
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for (i, &lo) in PRICE_BANDS.iter().enumerate() {
-            let hi = PRICE_BANDS.get(i + 1).copied();
+        // Adaptive price-band sweep. trade2 `/search` caps its result list at ~100
+        // ids per query with no pagination, so a band with more matches than that
+        // exposes only its cheapest 100 — which in the dense low/mid range are all
+        // pinned to the round-number floor. When a band reports more matches than it
+        // returns (incomplete) and sits in the value range, bisect it at the geometric
+        // midpoint and recover each half, until every fetched leaf is fully covered or
+        // the depth cap is hit. Cheap (< SUBBAND_VALUE_FLOOR) and the open-ended top
+        // band are harvested once. Work stack of (lo, hi, depth) seeded from
+        // PRICE_BANDS; dedup by listing id so an item on a split boundary logs once.
+        let mut stack: Vec<(f64, Option<f64>, usize)> = PRICE_BANDS
+            .iter()
+            .enumerate()
+            .map(|(i, &lo)| (lo, PRICE_BANDS.get(i + 1).copied(), 0usize))
+            .collect();
+        while let Some((lo, hi, depth)) = stack.pop() {
             let q = crate::trade::model::TradeQuery {
                 league: league.to_string(),
                 category: Some(category_id.to_string()),
@@ -214,10 +236,33 @@ impl<C: Comparables + crate::trade::client::TradeApi> TradePricer<C> {
             let resp = match self.comparables.search(&q, session).await {
                 Ok(r) => r,
                 Err(e) => {
-                    tracing::warn!(error = %e, band_lo = lo, "harvest band search failed; skipping");
+                    tracing::warn!(error = %e, band_lo = lo, band_hi = ?hi, "harvest band search failed; skipping");
                     continue;
                 }
             };
+            // The API returned fewer ids than matched → this band is under-covered;
+            // bisect (within the value range, up to the depth cap) rather than settle
+            // for its cheapest 100.
+            if (resp.total as usize) > resp.hashes.len()
+                && hi.is_some()
+                && lo >= SUBBAND_VALUE_FLOOR
+                && depth < MAX_SUBBAND_DEPTH
+            {
+                let hi_v = hi.unwrap();
+                let mid = (lo * hi_v).sqrt(); // geometric: finer where prices cluster
+                if mid > lo && mid < hi_v {
+                    tracing::info!(
+                        band_lo = lo,
+                        band_hi = hi_v,
+                        total = resp.total,
+                        depth,
+                        "harvest band split"
+                    );
+                    stack.push((mid, hi, depth + 1));
+                    stack.push((lo, Some(mid), depth + 1));
+                    continue;
+                }
+            }
             let sampled = stride_sample(&resp.hashes, HARVEST_SAMPLE);
             tracing::info!(
                 band_lo = lo,
@@ -225,16 +270,16 @@ impl<C: Comparables + crate::trade::client::TradeApi> TradePricer<C> {
                 total = resp.total,
                 returned = resp.hashes.len(),
                 sampled = sampled.len(),
+                depth,
                 "harvest band"
             );
             let listings = match self.comparables.fetch(&resp.id, &sampled, session).await {
                 Ok(l) => l,
                 Err(e) => {
-                    tracing::warn!(error = %e, band_lo = lo, "harvest band fetch failed; skipping");
+                    tracing::warn!(error = %e, band_lo = lo, band_hi = ?hi, "harvest band fetch failed; skipping");
                     continue;
                 }
             };
-            let timestamp_unix = crate::trade::age::now_unix();
             for l in &listings {
                 if !l.id.is_empty() && !seen.insert(l.id.clone()) {
                     continue; // already logged this listing from an earlier band
@@ -660,5 +705,132 @@ mod tests {
     #[test]
     fn stride_sample_zero_is_empty() {
         assert!(stride_sample::<i32>(&[1, 2, 3], 0).is_empty());
+    }
+
+    #[tokio::test]
+    async fn harvest_subdivides_dense_value_bands() {
+        use crate::trade::client::TradeApi;
+        use crate::trade::model::SearchResponse;
+        use std::sync::Mutex;
+
+        // A value-range band that reports far more matches than the API returns
+        // (incomplete) is bisected until each fetched leaf is covered or the depth cap
+        // is hit; cheap (<20 div) and already-complete bands are harvested once. Each
+        // leaf yields listings priced at its band floor, so subdivision shows up as
+        // price points strictly between a top band's edges.
+        struct DenseFake {
+            searches: Mutex<Vec<(f64, Option<f64>)>>,
+        }
+        #[async_trait]
+        impl Comparables for DenseFake {
+            async fn comparables(
+                &self,
+                _q: &TradeQuery,
+                _l: usize,
+                _mr: usize,
+                _mm: usize,
+                _s: &TradeSession,
+            ) -> anyhow::Result<Vec<Listing>> {
+                Ok(vec![])
+            }
+        }
+        #[async_trait]
+        impl TradeApi for DenseFake {
+            async fn search(
+                &self,
+                q: &TradeQuery,
+                _s: &TradeSession,
+            ) -> anyhow::Result<SearchResponse> {
+                let lo = q.min_price_divine.unwrap_or(0.0);
+                let hi = q.max_price_divine;
+                self.searches.lock().unwrap().push((lo, hi));
+                let width = hi.map(|h| h - lo).unwrap_or(f64::INFINITY);
+                // More matches than the 100-cap inside the value range while the slice
+                // is still wide; otherwise fully covered.
+                let incomplete = (20.0..200.0).contains(&lo) && width > 5.0;
+                let total: u64 = if incomplete { 500 } else { 3 };
+                let n = (total as usize).min(100);
+                let hashes = (0..n).map(|i| format!("{lo}_{i}")).collect();
+                Ok(SearchResponse {
+                    id: "qid".into(),
+                    total,
+                    hashes,
+                })
+            }
+            async fn fetch(
+                &self,
+                _id: &str,
+                hashes: &[String],
+                _s: &TradeSession,
+            ) -> anyhow::Result<Vec<Listing>> {
+                Ok(hashes
+                    .iter()
+                    .map(|h| {
+                        let price = h.split('_').next().unwrap().parse::<f64>().unwrap();
+                        Listing {
+                            price: Money {
+                                amount: price,
+                                currency: Currency::Divine,
+                            },
+                            price_divine: price,
+                            explicit_count: 1,
+                            id: h.clone(),
+                            base_type: Some("Chiming Staff".into()),
+                            mods: vec![crate::trade::model::ListingMod {
+                                stat_id: "explicit.stat_1".into(),
+                                tier: Some(1),
+                                roll: Some(50.0),
+                            }],
+                            indexed: None,
+                        }
+                    })
+                    .collect())
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("obs.jsonl");
+        let pricer = TradePricer::new(
+            DenseFake {
+                searches: Mutex::new(vec![]),
+            },
+            crate::trade::pseudo::PseudoMap::load(),
+            crate::trade::stats::StatCatalog::default(),
+            crate::observe::ObservationLog::new(&path),
+            std::sync::Arc::new(std::sync::RwLock::new(
+                crate::trade::value::ValueModel::default(),
+            )),
+        );
+        let n = pricer
+            .harvest(
+                "weapon.staff",
+                "Staff",
+                "Standard",
+                &TradeSession::for_test(),
+            )
+            .await
+            .unwrap();
+        assert!(n > 0);
+
+        let n_searches = pricer.comparables.searches.lock().unwrap().len();
+        assert!(
+            n_searches > PRICE_BANDS.len(),
+            "dense value bands were subdivided ({n_searches} searches)"
+        );
+        assert!(
+            n_searches < 80,
+            "subdivision is bounded by the depth cap ({n_searches} searches)"
+        );
+
+        // Subdivision reached above the [20,50) floor: some listing priced in (20,50).
+        let body = std::fs::read_to_string(&path).unwrap();
+        let prices: Vec<f64> = body
+            .lines()
+            .map(|l| serde_json::from_str::<Observation>(l).unwrap().price_divine)
+            .collect();
+        assert!(
+            prices.iter().any(|&p| p > 20.0 && p < 50.0),
+            "fetched a sub-band floor strictly inside (20,50), not just the band edge"
+        );
     }
 }
