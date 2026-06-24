@@ -17,6 +17,9 @@ pub const VALUE_REFRESH_MINS: u64 = 60;
 /// A stat needs at least this many listings before its lift is trusted (drives
 /// pricing; gates the conditional-lift computation).
 pub const MIN_STAT_SAMPLE: usize = 15;
+/// A stat needs at least this many samples before its magnitude curve is trusted
+/// (used by undersampled-gate detection).
+pub const MAGNITUDE_MIN_SAMPLE: usize = 15;
 /// A trusted stat with lift at or above this is a value-driver.
 pub const DRIVER_LIFT: f64 = 1.5;
 /// How many co-occurrence pairs to retain per category.
@@ -299,6 +302,7 @@ fn build_category(category: String, obs: &[&Observation]) -> CategoryModel {
     let mod_rolls = magnitude::build_mod_rolls(obs);
     let items = itemvec::build_item_vectors(obs, &mod_rolls);
     let (weights, loo_error) = backtest::tune_weights(&items);
+    let undersampled_gates = gates::detect_gates(&stats);
 
     CategoryModel {
         category,
@@ -309,7 +313,7 @@ fn build_category(category: String, obs: &[&Observation]) -> CategoryModel {
         mod_rolls,
         items,
         weights,
-        undersampled_gates: Vec::new(),
+        undersampled_gates,
         loo_error,
     }
 }
