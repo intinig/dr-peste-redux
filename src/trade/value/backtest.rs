@@ -13,6 +13,21 @@ const WEIGHT_GRID: [(f64, f64); 5] = [
     (0.0, 1.0),
 ];
 
+/// Cap on leave-one-out held-out probes per category. The neighbour search still
+/// scans ALL items; evaluating error on an evenly-spaced subset keeps calibration at
+/// O(grid × probes × n) instead of O(grid × n²) — bounding rebuild cost (notably the
+/// synchronous startup rebuild) as the corpus grows. Categories with ≤ this many
+/// items probe every item, so small-category behaviour is unchanged.
+const LOO_MAX_PROBES: usize = 400;
+
+/// How many held-out probes to evaluate for a corpus of `n` items: all of them up to
+/// the cap, then exactly `LOO_MAX_PROBES`. The probes are spread evenly across the
+/// whole corpus (see `loo_median_error`), so we never drop nearly half the data at the
+/// cap boundary the way a `ceil(n / cap)` stride would (e.g. n=401 → stride 2 → 201).
+fn loo_probe_count(n: usize) -> usize {
+    n.min(LOO_MAX_PROBES)
+}
+
 fn predict_one(items: &[ItemVector], skip: usize, w: SimWeights) -> Option<f64> {
     let q: Vec<(String, Option<f64>)> = items[skip].mods.clone();
     let mut scored: Vec<(f64, f64)> = items
@@ -31,14 +46,22 @@ fn predict_one(items: &[ItemVector], skip: usize, w: SimWeights) -> Option<f64> 
 }
 
 pub fn loo_median_error(items: &[ItemVector], w: SimWeights) -> Option<f64> {
-    let mut errs: Vec<f64> = Vec::new();
-    for i in 0..items.len() {
+    let n = items.len();
+    let probes = loo_probe_count(n);
+    if probes == 0 {
+        return None;
+    }
+    // Evenly-spaced probe indices across [0, n): `k·n/probes`. Each prediction still
+    // searches all other items for neighbours; only the number of held-out probes we
+    // measure error over is bounded (to `probes`), spread across the whole corpus.
+    let mut errs: Vec<f64> = Vec::with_capacity(probes);
+    for k in 0..probes {
+        let i = k * n / probes;
         let actual = items[i].price_divine;
-        if actual <= 0.0 {
-            continue;
-        }
-        if let Some(pred) = predict_one(items, i, w) {
-            errs.push((pred - actual).abs() / actual);
+        if actual > 0.0 {
+            if let Some(pred) = predict_one(items, i, w) {
+                errs.push((pred - actual).abs() / actual);
+            }
         }
     }
     if errs.len() < MIN_NEIGHBORS {
@@ -128,6 +151,32 @@ mod tests {
             w.jaccard >= w.roll,
             "combination-dominant → jaccard not beaten (w={:?})",
             w
+        );
+    }
+
+    #[test]
+    fn loo_probe_count_caps_and_covers_evenly() {
+        assert_eq!(loo_probe_count(40), 40, "small corpus probes every item");
+        assert_eq!(
+            loo_probe_count(LOO_MAX_PROBES),
+            LOO_MAX_PROBES,
+            "at the cap, probe all"
+        );
+        // Just over the cap: still ~the full cap of probes — no ceil-stride cliff that
+        // drops nearly half the data at the boundary (n=401 must NOT collapse to ~200).
+        assert_eq!(loo_probe_count(LOO_MAX_PROBES + 1), LOO_MAX_PROBES);
+        assert_eq!(loo_probe_count(5000), LOO_MAX_PROBES, "large corpus capped");
+        // Evenly-spaced indices `k·n/probes` span the corpus: start at 0, stay in range,
+        // strictly increasing (distinct + evenly spread, not one modulo class).
+        let n = LOO_MAX_PROBES + 1;
+        let probes = loo_probe_count(n);
+        let idx: Vec<usize> = (0..probes).map(|k| k * n / probes).collect();
+        assert_eq!(idx.len(), probes);
+        assert_eq!(idx[0], 0);
+        assert!(*idx.last().unwrap() < n, "indices in range");
+        assert!(
+            idx.windows(2).all(|w| w[1] > w[0]),
+            "strictly increasing → distinct, evenly spread"
         );
     }
 }
