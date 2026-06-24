@@ -7,23 +7,33 @@ use crate::trade::value::{canonical_category, CategoryModel, MIN_CATEGORY_SAMPLE
 use futures::Stream;
 use poise::serenity_prelude as serenity;
 
-/// Returns a single calibration line for a category:
-/// `Staff: n=1141, skill 23%, weights j/r 0.50/0.50 ✓trusted`
-/// or `Wand: n=42, skill n/a, weights j/r 0.75/0.25 ✗untrusted`.
-/// Skill shows `n/a` when `calibration.skill` is `None`.
+/// One calibration line per category, e.g.
+/// `Staff: n=2087 · model 75% · base 88% · skill +15% ✓ (beats baseline)`
+/// or `Amulet: n=1206 · model 75% · base 76% · skill −1% ✗ (no skill over baseline)`.
+/// Metrics show `n/a` when absent.
 pub fn calibration_line(cat: &CategoryModel) -> String {
-    let skill = match cat.calibration.skill {
-        Some(s) => format!("{:.0}%", s * 100.0),
+    let pct = |x: Option<f64>| match x {
+        Some(v) => format!("{:.0}%", v * 100.0),
         None => "n/a".to_string(),
     };
-    let trust_mark = if cat.is_trusted() {
-        "✓trusted"
+    let skill = match cat.calibration.skill {
+        Some(s) => format!("{:+.0}%", s * 100.0),
+        None => "n/a".to_string(),
+    };
+    let (mark, verdict) = if cat.is_trusted() {
+        ("✓", "beats baseline")
     } else {
-        "✗untrusted"
+        ("✗", "no skill over baseline")
     };
     format!(
-        "{}: n={}, skill {}, weights j/r {:.2}/{:.2} {}",
-        cat.category, cat.sample_size, skill, cat.weights.jaccard, cat.weights.roll, trust_mark,
+        "{}: n={} · model {} · base {} · skill {} {} ({})",
+        cat.category,
+        cat.sample_size,
+        pct(cat.calibration.model_err),
+        pct(cat.calibration.baseline_err),
+        skill,
+        mark,
+        verdict,
     )
 }
 
@@ -131,57 +141,48 @@ mod tests {
         assert_eq!(gate_section(&[], &catalog), "");
     }
 
-    fn make_cat(
+    fn cat(
         name: &str,
-        sample_size: usize,
+        n: usize,
+        model: Option<f64>,
+        base: Option<f64>,
         skill: Option<f64>,
-        jaccard: f64,
-        roll: f64,
     ) -> crate::trade::value::CategoryModel {
-        use crate::trade::value::backtest::Calibration;
-        use crate::trade::value::estimate::SimWeights;
         crate::trade::value::CategoryModel {
-            category: name.to_owned(),
-            sample_size,
-            calibration: Calibration {
+            category: name.into(),
+            sample_size: n,
+            calibration: crate::trade::value::backtest::Calibration {
+                model_err: model,
+                baseline_err: base,
                 skill,
-                ..Default::default()
             },
-            weights: SimWeights { jaccard, roll },
             ..Default::default()
         }
     }
 
     #[test]
-    fn calibration_line_trusted() {
-        // 1141 samples + positive skill → trusted
-        let cat = make_cat("Staff", 1141, Some(0.23), 0.50, 0.50);
-        let line = calibration_line(&cat);
-        assert!(line.contains("Staff:"), "category name: {line}");
-        assert!(line.contains("n=1141"), "sample_size: {line}");
-        assert!(line.contains("skill 23%"), "skill pct: {line}");
-        assert!(line.contains("j/r 0.50/0.50"), "weights: {line}");
-        assert!(line.contains("✓trusted"), "trust mark: {line}");
+    fn calibration_line_shows_skill_and_beats_verdict() {
+        let line = calibration_line(&cat("Staff", 2087, Some(0.75), Some(0.88), Some(0.15)));
+        assert!(line.contains("n=2087"), "{line}");
+        assert!(line.contains("skill"), "{line}");
+        assert!(line.contains("15%"), "{line}");
+        assert!(
+            line.contains("✓"),
+            "positive skill + samples → trusted mark: {line}"
+        );
     }
 
     #[test]
-    fn calibration_line_untrusted_under_sample() {
-        // 42 samples → untrusted regardless of skill
-        let cat = make_cat("Wand", 42, Some(0.64), 0.75, 0.25);
-        let line = calibration_line(&cat);
-        assert!(line.contains("Wand:"), "category name: {line}");
-        assert!(line.contains("n=42"), "sample_size: {line}");
-        assert!(line.contains("skill 64%"), "skill pct: {line}");
-        assert!(line.contains("j/r 0.75/0.25"), "weights: {line}");
-        assert!(line.contains("✗untrusted"), "trust mark: {line}");
+    fn calibration_line_marks_no_skill() {
+        let line = calibration_line(&cat("Amulet", 1206, Some(0.75), Some(0.76), Some(-0.01)));
+        assert!(line.contains("✗"), "negative skill → not trusted: {line}");
     }
 
     #[test]
-    fn calibration_line_no_skill() {
-        let cat = make_cat("Bow", 5, None, 1.0, 0.0);
-        let line = calibration_line(&cat);
-        assert!(line.contains("skill n/a"), "no skill: {line}");
-        assert!(line.contains("✗untrusted"), "trust mark: {line}");
+    fn calibration_line_handles_missing_metrics() {
+        let line = calibration_line(&cat("Wand", 12, None, None, None));
+        assert!(line.contains("n/a"), "{line}");
+        assert!(line.contains("✗"), "{line}");
     }
 }
 
