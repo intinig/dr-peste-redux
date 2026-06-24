@@ -39,10 +39,17 @@ undated). See memory `pricing-truth-seeking-not-tuning`, `value-model-cross-cate
 
 ## Decisions (settled in brainstorming, 2026-06-24)
 
-1. **Filter placement — split by nature.** Time-invariant junk (price band) drops
-   at *capture* (consistent with the existing mirror-tier/veiled drops in
-   `parse_fetch`); time-relative exclusion (freshness, undated legacy) is applied at
-   *consumption*. Raw rows are never destroyed → Keep+Filter preserved.
+1. **Filter placement — split by nature, with the sub-1-div floor consumption-only.**
+   The absurd-upper troll cap drops at *capture* (consistent with the existing
+   mirror-tier/veiled drops in `parse_fetch`) — it is pure junk on every path. The
+   **sub-1-div floor is applied only at consumption** (corpus learning), NOT at
+   capture: the live `/paste` pricer must still *see* sub-1-div listings so it can
+   detect and report a genuinely cheap item (see Component 4). Time-relative
+   exclusion (freshness, undated legacy) is also consumption-only. Raw rows are never
+   destroyed → Keep+Filter preserved.
+   *(This corrects an earlier draft that dropped sub-1-div at capture; that made the
+   Component-4 short-circuit unreachable, since the live median could then never fall
+   below 1 div. Caught in whole-branch review.)*
 2. **Sell-walls — conservative + re-measure.** Add an upper sanity backstop for the
    absurd trolls the mirror-tier filter misses; do **not** special-case round-number
    "999" walls (median absorbs ~6% high outliers). Ship, then re-measure Staff LOO;
@@ -70,9 +77,14 @@ pub const MIN_PRICEABLE_DIVINE: f64 = 1.0;
 /// any legitimate single-item price in a league.
 pub const ABSURD_DIVINE_CAP: f64 = 100_000.0;
 
-/// True if a divine price is in the band we price/learn from:
-/// `MIN_PRICEABLE_DIVINE <= price < ABSURD_DIVINE_CAP`.
+/// In the band we LEARN from: `MIN_PRICEABLE_DIVINE <= price < ABSURD_DIVINE_CAP`.
+/// Used at corpus consumption (`value::rebuild_into`).
 pub fn is_priceable(price_divine: f64) -> bool;
+
+/// Capture-time ceiling check: `price < ABSURD_DIVINE_CAP`. Imposes NO 1-div floor,
+/// so sub-1-div listings reach the live `/paste` pricer (Component 4). Used in
+/// `client::parse_fetch`.
+pub fn is_below_absurd_cap(price_divine: f64) -> bool;
 ```
 
 `MIN_PRICEABLE_DIVINE` is a floor on *what we bother pricing*, not a tuned model
@@ -81,11 +93,13 @@ parameter — it does not move with any observed/target price.
 ### 2. Capture — `src/trade/client.rs::parse_fetch`
 
 After the existing currency-convert + `price_divine <= 0.0` + mirror-tier + veiled
-drops, add: `if !crate::trade::quality::is_priceable(price_divine) { return None; }`.
-This keeps **future** harvest rows and **live ablation comparables** clean in one
-place. The existing `≥ 0.8 × mirror` filter stays as the primary upper bound; the
-`ABSURD_DIVINE_CAP` half of `is_priceable` only bites when mirror conversion was
-unavailable.
+drops, add: `if !crate::trade::quality::is_below_absurd_cap(price_divine) { return None; }`.
+This drops only absurd troll prices the mirror-tier filter can't catch when the
+mirror rate is unavailable — it does **not** impose the 1-div floor. Sub-1-div
+listings are intentionally kept here so the live `/paste` pricer (Component 4) can
+detect a genuinely cheap item; the 1-div floor is a corpus-learning concern applied
+in Component 3. The existing `≥ 0.8 × mirror` filter stays as the primary upper bound;
+`is_below_absurd_cap` only bites when mirror conversion was unavailable.
 
 ### 3. Consumption — `src/trade/value/mod.rs::rebuild_into`
 
