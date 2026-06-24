@@ -8,6 +8,7 @@ pub mod client;
 pub mod limiter;
 pub mod model;
 pub mod pseudo;
+pub mod quality;
 pub mod query;
 pub mod rates;
 pub mod session;
