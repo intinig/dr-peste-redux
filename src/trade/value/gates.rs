@@ -4,7 +4,6 @@
 use super::{DRIVER_LIFT, MAGNITUDE_MIN_SAMPLE};
 use crate::trade::value::StatValue;
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct GateCandidate {
     pub stat_id: String,

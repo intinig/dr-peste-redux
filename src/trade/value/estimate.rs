@@ -1,7 +1,6 @@
 //! Similarity-weight parameters for the k-NN estimate (Task 6).
 //! Stub: fields populated to zero by Default; training fills them.
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SimWeights {
     pub jaccard: f64,
@@ -9,9 +8,7 @@ pub struct SimWeights {
 }
 
 use super::itemvec::ItemVector;
-use std::collections::{HashMap, HashSet};
 
-#[allow(dead_code)]
 impl SimWeights {
     pub fn normalized(self) -> SimWeights {
         let s = self.jaccard + self.roll;
@@ -29,32 +26,35 @@ impl SimWeights {
     }
 }
 
-#[allow(dead_code)]
 pub fn similarity(query: &[(String, Option<f64>)], item: &ItemVector, w: SimWeights) -> f64 {
     if query.is_empty() || item.mods.is_empty() {
         return 0.0;
     }
-    let qset: HashSet<&str> = query.iter().map(|(s, _)| s.as_str()).collect();
-    let iset: HashSet<&str> = item.mods.iter().map(|(s, _)| s.as_str()).collect();
-    let inter = qset.intersection(&iset).count();
-    let union = qset.union(&iset).count();
+    // PoE invariant: mod names are unique within an item/query, so set sizes equal
+    // slice lengths and a linear scan is exact. Items carry ≤6 mods, so this beats
+    // allocating two HashSets + a HashMap on every call — and `similarity` is the
+    // k-NN + LOO-backtest hot path (grid × probes × n calls per rebuild).
+    let mut inter = 0usize;
+    for (q, _) in query {
+        if item.mods.iter().any(|(m, _)| m == q) {
+            inter += 1;
+        }
+    }
+    let union = query.len() + item.mods.len() - inter;
     let jac = if union == 0 {
         0.0
     } else {
         inter as f64 / union as f64
     };
 
-    // mod names are unique within an item/query (PoE invariant); last-wins is moot
-    let qroll: HashMap<&str, f64> = query
-        .iter()
-        .filter_map(|(s, r)| r.map(|r| (s.as_str(), r)))
-        .collect();
     let mut sum = 0.0;
     let mut n = 0usize;
     for (s, r) in &item.mods {
-        if let (Some(item_roll), Some(query_roll)) = (r, qroll.get(s.as_str())) {
-            sum += 1.0 - (query_roll - item_roll).abs();
-            n += 1;
+        if let Some(item_roll) = r {
+            if let Some((_, Some(query_roll))) = query.iter().find(|(qs, _)| qs == s) {
+                sum += 1.0 - (query_roll - item_roll).abs();
+                n += 1;
+            }
         }
     }
     let roll = if n == 0 { 0.0 } else { sum / n as f64 };
@@ -62,7 +62,6 @@ pub fn similarity(query: &[(String, Option<f64>)], item: &ItemVector, w: SimWeig
     w.jaccard * jac + w.roll * roll
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Confidence {
     High,
@@ -70,7 +69,6 @@ pub enum Confidence {
     Low,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct ValueEstimate {
     pub value_divine: f64,
@@ -80,7 +78,6 @@ pub struct ValueEstimate {
 
 /// Median of prices weighted by similarity. `scored` is (sim, price), sim>0.
 /// `pub(crate)` so Task 6 (backtest) can reuse it directly.
-#[allow(dead_code)]
 pub(crate) fn weighted_median(scored: &[(f64, f64)]) -> f64 {
     let mut v: Vec<(f64, f64)> = scored.to_vec();
     v.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -98,7 +95,6 @@ pub(crate) fn weighted_median(scored: &[(f64, f64)]) -> f64 {
     v.last().map(|(_, p)| *p).unwrap_or(0.0)
 }
 
-#[allow(dead_code)]
 fn relative_spread(prices: &[f64], center: f64) -> f64 {
     if center <= 0.0 || prices.is_empty() {
         return f64::INFINITY;
@@ -108,7 +104,6 @@ fn relative_spread(prices: &[f64], center: f64) -> f64 {
     dev[dev.len() / 2] / center // median abs deviation / center
 }
 
-#[allow(dead_code)]
 impl crate::trade::value::CategoryModel {
     pub fn query_from_stats(&self, stats: &[(String, Option<f64>)]) -> Vec<(String, Option<f64>)> {
         stats

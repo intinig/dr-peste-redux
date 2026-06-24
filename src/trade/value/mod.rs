@@ -25,7 +25,6 @@ pub const DRIVER_LIFT: f64 = 1.5;
 /// How many co-occurrence pairs to retain per category.
 const TOP_COOCCURRENCE: usize = 8;
 /// Number of evenly-spaced quantile knots stored per mod for roll-magnitude normalization.
-#[allow(dead_code)]
 pub const ROLL_QUANTILES: usize = 21;
 /// Maximum number of nearest neighbours to consider for k-NN value estimate.
 pub const K_NEIGHBORS: usize = 15;
@@ -116,14 +115,10 @@ pub struct CategoryModel {
     /// Stats in deconfounded rank order (drivers first).
     pub stats: Vec<StatValue>,
     pub cooccurrences: Vec<ModPair>,
-    #[allow(dead_code)]
     pub mod_rolls: HashMap<String, magnitude::RollStats>,
-    #[allow(dead_code)]
     pub items: Vec<itemvec::ItemVector>,
     pub weights: estimate::SimWeights,
-    #[allow(dead_code)]
     pub undersampled_gates: Vec<gates::GateCandidate>,
-    #[allow(dead_code)]
     pub loo_error: Option<f64>,
 }
 

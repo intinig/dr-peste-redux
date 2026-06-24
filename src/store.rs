@@ -32,6 +32,17 @@ impl PriceStore {
     pub async fn snapshot(&self) -> Option<Snapshot> {
         self.inner.read().await.clone()
     }
+
+    /// Cheap accessor for just the active league name. Unlike `snapshot()`, this
+    /// does not clone the whole `Snapshot` (which copies the entire `items` vec) —
+    /// use it on hot paths like autocomplete handlers that only need the league.
+    pub async fn league_name(&self) -> Option<String> {
+        self.inner
+            .read()
+            .await
+            .as_ref()
+            .map(|s| s.league.name.clone())
+    }
 }
 
 pub fn find_exact<'a>(items: &'a [PricedItem], name: &str) -> Option<&'a PricedItem> {

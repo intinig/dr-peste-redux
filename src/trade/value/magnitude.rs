@@ -5,7 +5,6 @@ use super::ROLL_QUANTILES;
 use crate::observe::Observation;
 use std::collections::HashMap;
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub struct RollStats {
     /// Evenly-spaced quantile knots (ROLL_QUANTILES of them), ascending.
@@ -34,7 +33,6 @@ impl RollStats {
     }
 
     /// Percentile of `roll` in [0,1]; 0.0 if the distribution is degenerate.
-    #[allow(dead_code)]
     pub fn normalize(&self, roll: f64) -> f64 {
         let q = &self.quantiles;
         if q.len() < 2 || q[q.len() - 1] <= q[0] {
@@ -62,7 +60,6 @@ impl RollStats {
     }
 }
 
-#[allow(dead_code)]
 pub fn build_mod_rolls(obs: &[&Observation]) -> HashMap<String, RollStats> {
     let mut rolls: HashMap<&str, Vec<f64>> = HashMap::new();
     for o in obs {

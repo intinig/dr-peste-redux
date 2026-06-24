@@ -162,7 +162,6 @@ impl<C: Comparables> TradePricer<C> {
     ///
     /// The method is intentionally synchronous — it only reads the in-memory
     /// model; no I/O is performed.
-    #[allow(dead_code)]
     pub fn learned_estimate(
         &self,
         item: &ParsedItem,
@@ -188,6 +187,11 @@ impl<C: Comparables> TradePricer<C> {
         }
 
         // 5. Resolve explicit mods to (stat_id, raw_roll).
+        // INVARIANT: the corpus stores EXPLICIT mods only (`ListingMod` is "one explicit
+        // mod on a fetched listing"), so the query must be built from explicits only —
+        // the k-NN similarity compares mod-sets, and mixing in implicits/runes here would
+        // desync the query's mod-set from the corpus's and skew Jaccard. If a future
+        // harvest ever captures implicits into `Observation.mods`, revisit this resolve.
         let resolved: Vec<(String, Option<f64>)> = item
             .explicits
             .iter()
