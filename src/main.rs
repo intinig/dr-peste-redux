@@ -58,7 +58,7 @@ fn spawn_refresher(
 }
 
 fn spawn_value_refresher(
-    log: ObservationLog,
+    log_path: String,
     value: std::sync::Arc<std::sync::RwLock<ValueModel>>,
     catalog: std::sync::Arc<trade::stats::StatCatalog>,
     interval: Duration,
@@ -66,7 +66,16 @@ fn spawn_value_refresher(
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(interval).await;
-            rebuild_into(&log, &value, &catalog);
+            let log_path = log_path.clone();
+            let value = value.clone();
+            let catalog = catalog.clone();
+            // rebuild_into now runs the per-category LOO weight tuning (O(grid×n²));
+            // run it on a blocking thread so it can't stall Discord command futures /
+            // rate-limit timers on the async runtime. Mirrors the post-harvest rebuild.
+            let _ = tokio::task::spawn_blocking(move || {
+                rebuild_into(&ObservationLog::new(&log_path), &value, &catalog);
+            })
+            .await;
         }
     });
 }
@@ -117,7 +126,7 @@ async fn main() -> Result<()> {
         &catalog_arc,
     ); // startup build
     spawn_value_refresher(
-        ObservationLog::new(&config.observation_log_path),
+        config.observation_log_path.clone(),
         value.clone(),
         catalog_arc.clone(),
         Duration::from_secs(VALUE_REFRESH_MINS * 60),

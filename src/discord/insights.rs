@@ -74,12 +74,13 @@ pub fn gate_section(
     }
     let mut out = String::from("\n**Undersampled gates** (need more data):\n");
     for g in gates.iter().take(8) {
-        let lbl = g
-            .label
-            .as_deref()
-            .or_else(|| catalog.label_for(&g.stat_id))
-            .unwrap_or(&g.stat_id);
-        out.push_str(&format!("• {} (n={})\n", lbl, g.count));
+        // Always show the raw stat_id (in backticks) — it's the value the operator
+        // pastes into `/harvest mod:` (gate-driven autocomplete not yet wired), with
+        // the human label alongside it when known.
+        match g.label.as_deref().or_else(|| catalog.label_for(&g.stat_id)) {
+            Some(lbl) => out.push_str(&format!("• {} — `{}` (n={})\n", lbl, g.stat_id, g.count)),
+            None => out.push_str(&format!("• `{}` (n={})\n", g.stat_id, g.count)),
+        }
     }
     out
 }
@@ -119,6 +120,11 @@ mod tests {
         assert!(
             section.contains("explicit.stat_5678"),
             "fallback id missing: {section}"
+        );
+        // Labeled gate must ALSO expose its raw stat_id (copyable for /harvest mod:)
+        assert!(
+            section.contains("explicit.stat_1234"),
+            "labeled gate must still show its copyable stat_id: {section}"
         );
     }
 
