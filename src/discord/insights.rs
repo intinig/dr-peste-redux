@@ -3,9 +3,33 @@
 //! everyone (non-secret market data).
 
 use super::{Context, Error};
-use crate::trade::value::{canonical_category, MIN_CATEGORY_SAMPLE};
+use crate::trade::value::{
+    canonical_category, CategoryModel, MIN_CATEGORY_SAMPLE, TRUST_MAX_ERROR, TRUST_MIN_SAMPLE,
+};
 use futures::Stream;
 use poise::serenity_prelude as serenity;
+
+/// Returns a single calibration line for a category:
+/// `Staff: n=1141, LOO err 31%, weights j/r 0.50/0.50 ✓trusted`
+/// or `Wand: n=42, LOO err 64%, weights j/r 0.75/0.25 ✗untrusted`.
+/// LOO err shows `n/a` when `loo_error` is `None`.
+pub fn calibration_line(cat: &CategoryModel) -> String {
+    let loo = match cat.loo_error {
+        Some(e) => format!("{:.0}%", e * 100.0),
+        None => "n/a".to_string(),
+    };
+    let trusted =
+        cat.sample_size >= TRUST_MIN_SAMPLE && cat.loo_error.is_some_and(|e| e <= TRUST_MAX_ERROR);
+    let trust_mark = if trusted {
+        "✓trusted"
+    } else {
+        "✗untrusted"
+    };
+    format!(
+        "{}: n={}, LOO err {}, weights j/r {:.2}/{:.2} {}",
+        cat.category, cat.sample_size, loo, cat.weights.jaccard, cat.weights.roll, trust_mark,
+    )
+}
 
 /// The active league name from the store snapshot, if the bot has warmed up.
 async fn current_league(ctx: &Context<'_>) -> Option<String> {
@@ -103,6 +127,53 @@ mod tests {
         let catalog = StatCatalog::default();
         assert_eq!(gate_section(&[], &catalog), "");
     }
+
+    fn make_cat(
+        name: &str,
+        sample_size: usize,
+        loo_error: Option<f64>,
+        jaccard: f64,
+        roll: f64,
+    ) -> crate::trade::value::CategoryModel {
+        use crate::trade::value::estimate::SimWeights;
+        crate::trade::value::CategoryModel {
+            category: name.to_owned(),
+            sample_size,
+            loo_error,
+            weights: SimWeights { jaccard, roll },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn calibration_line_trusted() {
+        let cat = make_cat("Staff", 1141, Some(0.31), 0.50, 0.50);
+        let line = calibration_line(&cat);
+        assert!(line.contains("Staff:"), "category name: {line}");
+        assert!(line.contains("n=1141"), "sample_size: {line}");
+        assert!(line.contains("LOO err 31%"), "loo pct: {line}");
+        assert!(line.contains("j/r 0.50/0.50"), "weights: {line}");
+        assert!(line.contains("✓trusted"), "trust mark: {line}");
+    }
+
+    #[test]
+    fn calibration_line_untrusted_high_error() {
+        let cat = make_cat("Wand", 42, Some(0.64), 0.75, 0.25);
+        let line = calibration_line(&cat);
+        assert!(line.contains("Wand:"), "category name: {line}");
+        assert!(line.contains("n=42"), "sample_size: {line}");
+        assert!(line.contains("LOO err 64%"), "loo pct: {line}");
+        assert!(line.contains("j/r 0.75/0.25"), "weights: {line}");
+        assert!(line.contains("✗untrusted"), "trust mark: {line}");
+    }
+
+    #[test]
+    fn calibration_line_no_loo_error() {
+        let cat = make_cat("Bow", 5, None, 1.0, 0.0);
+        let line = calibration_line(&cat);
+        assert!(line.contains("LOO err n/a"), "no loo: {line}");
+        assert!(line.contains("✗untrusted"), "trust mark: {line}");
+    }
 }
 
 /// Show learned value-drivers for a category (or list categories with no arg).
@@ -137,10 +208,7 @@ pub async fn insights(
                 } else {
                     let mut lines = String::new();
                     for c in trusted.iter().take(25) {
-                        lines.push_str(&format!(
-                            "• **{}** — {} listings (median {:.1} div)\n",
-                            c.category, c.sample_size, c.base_median
-                        ));
+                        lines.push_str(&format!("• {}\n", calibration_line(c)));
                     }
                     lines.push_str("\nPass one, e.g. `/insights category:Staff`.");
                     serenity::CreateEmbed::default()
