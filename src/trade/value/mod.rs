@@ -24,6 +24,10 @@ const TOP_COOCCURRENCE: usize = 8;
 /// Number of evenly-spaced quantile knots stored per mod for roll-magnitude normalization.
 #[allow(dead_code)]
 pub const ROLL_QUANTILES: usize = 21;
+/// Maximum number of nearest neighbours to consider for k-NN value estimate.
+pub const K_NEIGHBORS: usize = 15;
+/// Minimum neighbours required to emit a `ValueEstimate` (otherwise `None`).
+pub const MIN_NEIGHBORS: usize = 5;
 
 pub mod estimate;
 pub mod gates;

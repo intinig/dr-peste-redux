@@ -62,6 +62,88 @@ pub fn similarity(query: &[(String, Option<f64>)], item: &ItemVector, w: SimWeig
     w.jaccard * jac + w.roll * roll
 }
 
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Confidence {
+    High,
+    Medium,
+    Low,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct ValueEstimate {
+    pub value_divine: f64,
+    pub confidence: Confidence,
+    pub neighbors: usize,
+}
+
+/// Median of prices weighted by similarity. `scored` is (sim, price), sim>0.
+/// `pub(crate)` so Task 6 (backtest) can reuse it directly.
+#[allow(dead_code)]
+pub(crate) fn weighted_median(scored: &[(f64, f64)]) -> f64 {
+    let mut v: Vec<(f64, f64)> = scored.to_vec();
+    v.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    let total: f64 = v.iter().map(|(s, _)| *s).sum();
+    if total <= 0.0 {
+        return 0.0;
+    }
+    let mut acc = 0.0;
+    for (s, p) in &v {
+        acc += s;
+        if acc >= total / 2.0 {
+            return *p;
+        }
+    }
+    v.last().map(|(_, p)| *p).unwrap_or(0.0)
+}
+
+#[allow(dead_code)]
+fn relative_spread(prices: &[f64], center: f64) -> f64 {
+    if center <= 0.0 || prices.is_empty() {
+        return f64::INFINITY;
+    }
+    let mut dev: Vec<f64> = prices.iter().map(|p| (p - center).abs()).collect();
+    dev.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    dev[dev.len() / 2] / center // median abs deviation / center
+}
+
+#[allow(dead_code)]
+impl crate::trade::value::CategoryModel {
+    pub fn estimate(&self, query: &[(String, Option<f64>)]) -> Option<ValueEstimate> {
+        if self.items.is_empty() {
+            return None;
+        }
+        let mut scored: Vec<(f64, f64)> = self
+            .items
+            .iter()
+            .map(|it| (similarity(query, it, self.weights), it.price_divine))
+            .filter(|(s, _)| *s > 0.0)
+            .collect();
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(super::K_NEIGHBORS);
+        if scored.len() < super::MIN_NEIGHBORS {
+            return None;
+        }
+        let value_divine = weighted_median(&scored);
+        let top_sim = scored[0].0;
+        let prices: Vec<f64> = scored.iter().map(|(_, p)| *p).collect();
+        let spread = relative_spread(&prices, value_divine);
+        let confidence = if scored.len() >= super::K_NEIGHBORS && top_sim >= 0.6 && spread <= 0.5 {
+            Confidence::High
+        } else if scored.len() >= super::MIN_NEIGHBORS * 2 && spread <= 1.0 {
+            Confidence::Medium
+        } else {
+            Confidence::Low
+        };
+        Some(ValueEstimate {
+            value_divine,
+            confidence,
+            neighbors: scored.len(),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -110,5 +192,49 @@ mod tests {
         }
         .normalized();
         assert_eq!(similarity(&[], &item, w), 0.0);
+    }
+
+    #[test]
+    fn estimate_returns_weighted_median_of_neighbors() {
+        use crate::trade::value::CategoryModel;
+        let items = (0..10)
+            .map(|i| ItemVector {
+                mods: vec![("a".into(), Some(0.5)), ("b".into(), None)],
+                price_divine: 100.0 + i as f64, // 100..109
+            })
+            .collect();
+        let cat = CategoryModel {
+            items,
+            weights: SimWeights {
+                jaccard: 1.0,
+                roll: 0.0,
+            },
+            ..Default::default()
+        };
+        let est = cat
+            .estimate(&[("a".into(), Some(0.5)), ("b".into(), None)])
+            .expect("estimate");
+        assert!(est.value_divine >= 100.0 && est.value_divine <= 109.0);
+        assert!(est.neighbors >= super::super::MIN_NEIGHBORS);
+    }
+
+    #[test]
+    fn estimate_none_when_too_few_neighbors() {
+        use crate::trade::value::CategoryModel;
+        let cat = CategoryModel {
+            items: vec![ItemVector {
+                mods: vec![("a".into(), None)],
+                price_divine: 5.0,
+            }],
+            weights: SimWeights {
+                jaccard: 1.0,
+                roll: 0.0,
+            },
+            ..Default::default()
+        };
+        assert!(
+            cat.estimate(&[("a".into(), None)]).is_none(),
+            "1 neighbor < MIN_NEIGHBORS"
+        );
     }
 }
