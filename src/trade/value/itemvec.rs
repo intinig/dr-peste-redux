@@ -56,7 +56,7 @@ mod tests {
             source: Source::Harvest,
             indexed: None,
         };
-        let obs = vec![mk(10.0, 1.0), mk(30.0, 2.0), mk(50.0, 3.0)];
+        let obs = [mk(10.0, 1.0), mk(30.0, 2.0), mk(50.0, 3.0)];
         let refs: Vec<&Observation> = obs.iter().collect();
         let mr = super::super::magnitude::build_mod_rolls(&refs);
         let vecs = build_item_vectors(&refs, &mr);

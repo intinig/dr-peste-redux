@@ -31,7 +31,7 @@ pub fn detect_gates(stats: &[StatValue]) -> Vec<GateCandidate> {
             count: s.count,
         })
         .collect();
-    out.sort_by(|a, b| a.count.cmp(&b.count));
+    out.sort_by_key(|a| a.count);
     out
 }
 
