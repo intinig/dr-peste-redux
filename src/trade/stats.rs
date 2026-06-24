@@ -111,22 +111,25 @@ impl StatCatalog {
         ];
         let mut groups: HashMap<StatGroup, HashMap<String, String>> = HashMap::new();
         let mut labels: HashMap<String, String> = HashMap::new();
-        for g in &raw.result {
-            // Reverse id→text labels are indexed for EVERY group, so /insights can
-            // render value-drivers and undersampled gates from any affix group
-            // (desecrated, crafted, fractured, …) — not only the clipboard-matchable
-            // ones — with human text instead of raw `desecrated.stat_…` ids.
-            for e in &g.entries {
-                labels.entry(e.id.clone()).or_insert_with(|| e.text.clone());
-            }
+        // Consume `raw` so `e.id`/`e.text` move into `labels` (one allocation each)
+        // rather than being cloned. A single pass over each group's entries.
+        for g in raw.result {
             // The clipboard-match map (normalized text → id) stays limited to the
             // groups we price/match against.
-            if let Some(sg) = want.iter().copied().find(|s| s.json_id() == g.id) {
-                let map = groups.entry(sg).or_default();
-                for e in &g.entries {
-                    map.entry(normalize(&e.text))
+            let sg = want.iter().copied().find(|s| s.json_id() == g.id);
+            for e in g.entries {
+                if let Some(sg) = sg {
+                    groups
+                        .entry(sg)
+                        .or_default()
+                        .entry(normalize(&e.text))
                         .or_insert_with(|| e.id.clone());
                 }
+                // Reverse id→text labels are indexed for EVERY group, so /insights can
+                // render value-drivers and undersampled gates from any affix group
+                // (desecrated, crafted, fractured, …) — not only the clipboard-matchable
+                // ones — with human text instead of raw `desecrated.stat_…` ids.
+                labels.entry(e.id).or_insert(e.text);
             }
         }
         Ok(StatCatalog { groups, labels })
