@@ -238,25 +238,17 @@ impl<C: Comparables> TradePricer<C> {
 }
 
 impl<C: Comparables + crate::trade::client::TradeApi> TradePricer<C> {
-    /// Price-band sweep of a whole category, logging every listing to the corpus
-    /// as a Harvest observation. Returns the number of observations logged. Each
-    /// search/fetch is throttle-paced by the member session; a per-band failure is
-    /// logged and skipped so one bad band doesn't abort the whole harvest.
-    pub async fn harvest(
+    /// Core adaptive price-band sweep. `base_query` is a `TradeQuery` template
+    /// carrying the category (and optionally a stats filter); each band query is
+    /// built by cloning the template and setting `min_price_divine`/`max_price_divine`.
+    /// Returns the number of observations logged in this sweep.
+    async fn harvest_sweep(
         &self,
-        category_id: &str,
+        base_query: &crate::trade::model::TradeQuery,
         category_text: &str,
-        league: &str,
         session: &TradeSession,
     ) -> Result<usize> {
         let mut logged = 0usize;
-        // Disjoint, bounded price bands `[lo, hi)` (last open-ended). Bounding each
-        // band by max — and sampling evenly across the price-sorted results rather
-        // than taking the cheapest prefix — keeps each band's sample representative
-        // across its whole range instead of repeatedly oversampling the global cheap
-        // end. Dedup by listing id across bands so a boundary item appearing in two
-        // adjacent bands is logged once; empty ids can't be deduped, so are always
-        // logged.
         let timestamp_unix = crate::trade::age::now_unix();
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         // Adaptive price-band sweep. trade2 `/search` caps its result list at ~100
@@ -275,14 +267,9 @@ impl<C: Comparables + crate::trade::client::TradeApi> TradePricer<C> {
             .collect();
         while let Some((lo, hi, depth)) = stack.pop() {
             let q = crate::trade::model::TradeQuery {
-                league: league.to_string(),
-                category: Some(category_id.to_string()),
-                type_line: None,
-                stats: vec![],
-                misc: crate::trade::model::MiscFilters::default(),
-                equipment: vec![],
                 min_price_divine: if lo > 0.0 { Some(lo) } else { None },
                 max_price_divine: hi,
+                ..base_query.clone()
             };
             let resp = match self.comparables.search(&q, session).await {
                 Ok(r) => r,
@@ -341,7 +328,7 @@ impl<C: Comparables + crate::trade::client::TradeApi> TradePricer<C> {
                 }
                 let obs = Observation {
                     timestamp_unix,
-                    league: league.to_string(),
+                    league: base_query.league.clone(),
                     base_type: l.base_type.clone(),
                     category: Some(category_text.to_string()),
                     mods: l.mods.clone(),
@@ -357,6 +344,69 @@ impl<C: Comparables + crate::trade::client::TradeApi> TradePricer<C> {
             }
         }
         Ok(logged)
+    }
+
+    /// Price-band sweep of a whole category, logging every listing to the corpus
+    /// as a Harvest observation. Returns the number of observations logged. Each
+    /// search/fetch is throttle-paced by the member session; a per-band failure is
+    /// logged and skipped so one bad band doesn't abort the whole harvest.
+    pub async fn harvest(
+        &self,
+        category_id: &str,
+        category_text: &str,
+        league: &str,
+        session: &TradeSession,
+    ) -> Result<usize> {
+        // Disjoint, bounded price bands `[lo, hi)` (last open-ended). Bounding each
+        // band by max — and sampling evenly across the price-sorted results rather
+        // than taking the cheapest prefix — keeps each band's sample representative
+        // across its whole range instead of repeatedly oversampling the global cheap
+        // end. Dedup by listing id across bands so a boundary item appearing in two
+        // adjacent bands is logged once; empty ids can't be deduped, so are always
+        // logged.
+        let base_query = crate::trade::model::TradeQuery {
+            league: league.to_string(),
+            category: Some(category_id.to_string()),
+            type_line: None,
+            stats: vec![],
+            misc: crate::trade::model::MiscFilters::default(),
+            equipment: vec![],
+            min_price_divine: None,
+            max_price_divine: None,
+        };
+        self.harvest_sweep(&base_query, category_text, session)
+            .await
+    }
+
+    /// Targeted price-band sweep for items carrying a specific mod (`stat_id`).
+    /// Every band query carries a presence `StatFilter` (the stat id, no min/max)
+    /// so every fetched listing has the gate mod. Uses the same adaptive bisecting
+    /// sweep as `harvest`; one mod at a time to stay polite to the rate limiter.
+    pub async fn harvest_mod(
+        &self,
+        category_id: &str,
+        category_text: &str,
+        league: &str,
+        stat_id: &str,
+        session: &TradeSession,
+    ) -> Result<usize> {
+        let base_query = crate::trade::model::TradeQuery {
+            league: league.to_string(),
+            category: Some(category_id.to_string()),
+            type_line: None,
+            stats: vec![crate::trade::model::StatFilter {
+                id: stat_id.to_string(),
+                label: String::new(),
+                min: None,
+                max: None,
+            }],
+            misc: crate::trade::model::MiscFilters::default(),
+            equipment: vec![],
+            min_price_divine: None,
+            max_price_divine: None,
+        };
+        self.harvest_sweep(&base_query, category_text, session)
+            .await
     }
 }
 
@@ -1090,5 +1140,127 @@ mod tests {
             prices.iter().any(|&p| p > 20.0 && p < 50.0),
             "fetched a sub-band floor strictly inside (20,50), not just the band edge"
         );
+    }
+
+    /// `harvest_mod` must include the pinned stat id in every band query's `stats`
+    /// vec. Uses a fake `TradeApi` that records every `TradeQuery` it receives so
+    /// we can assert post-hoc that each query carries the expected `StatFilter`.
+    #[tokio::test]
+    async fn harvest_mod_pins_stat_id_in_every_band_query() {
+        use crate::trade::client::TradeApi;
+        use crate::trade::model::{SearchResponse, StatFilter};
+        use std::sync::Mutex;
+
+        struct ModHarvestFake {
+            queries: Mutex<Vec<TradeQuery>>,
+        }
+        #[async_trait]
+        impl Comparables for ModHarvestFake {
+            async fn comparables(
+                &self,
+                _q: &TradeQuery,
+                _l: usize,
+                _mr: usize,
+                _mm: usize,
+                _s: &TradeSession,
+            ) -> anyhow::Result<Vec<Listing>> {
+                Ok(vec![])
+            }
+        }
+        #[async_trait]
+        impl TradeApi for ModHarvestFake {
+            async fn search(
+                &self,
+                q: &TradeQuery,
+                _s: &TradeSession,
+            ) -> anyhow::Result<SearchResponse> {
+                self.queries.lock().unwrap().push(q.clone());
+                let band = q.min_price_divine.unwrap_or(0.0);
+                Ok(SearchResponse {
+                    id: format!("q{band}"),
+                    total: 1,
+                    hashes: vec![format!("h{band}")],
+                })
+            }
+            async fn fetch(
+                &self,
+                _id: &str,
+                hashes: &[String],
+                _s: &TradeSession,
+            ) -> anyhow::Result<Vec<Listing>> {
+                Ok(hashes
+                    .iter()
+                    .map(|h| Listing {
+                        price: Money {
+                            amount: 1.0,
+                            currency: Currency::Divine,
+                        },
+                        price_divine: 1.0,
+                        explicit_count: 1,
+                        id: h.clone(),
+                        base_type: Some("Chiming Staff".into()),
+                        mods: vec![crate::trade::model::ListingMod {
+                            stat_id: "explicit.stat_gate".into(),
+                            tier: Some(1),
+                            roll: Some(50.0),
+                        }],
+                        indexed: None,
+                    })
+                    .collect())
+            }
+        }
+
+        const TARGET_STAT: &str = "explicit.stat_gate";
+
+        let dir = tempfile::tempdir().unwrap();
+        let pricer = TradePricer::new(
+            ModHarvestFake {
+                queries: Mutex::new(vec![]),
+            },
+            crate::trade::pseudo::PseudoMap::load(),
+            crate::trade::stats::StatCatalog::default(),
+            crate::observe::ObservationLog::new(dir.path().join("obs.jsonl")),
+            std::sync::Arc::new(std::sync::RwLock::new(
+                crate::trade::value::ValueModel::default(),
+            )),
+        );
+        let n = pricer
+            .harvest_mod(
+                "weapon.staff",
+                "Staff",
+                "Standard",
+                TARGET_STAT,
+                &TradeSession::for_test(),
+            )
+            .await
+            .unwrap();
+
+        // Exactly one observation logged per band (the fake returns one per band).
+        assert_eq!(n, PRICE_BANDS.len(), "expected exactly one obs per band");
+
+        // Every search query must carry exactly the pinned stat filter.
+        let queries = pricer.comparables.queries.lock().unwrap();
+        assert_eq!(
+            queries.len(),
+            PRICE_BANDS.len(),
+            "expected one search per band"
+        );
+        for q in queries.iter() {
+            assert_eq!(
+                q.stats.len(),
+                1,
+                "each band query must carry exactly one StatFilter"
+            );
+            assert_eq!(
+                q.stats[0],
+                StatFilter {
+                    id: TARGET_STAT.to_string(),
+                    label: String::new(),
+                    min: None,
+                    max: None,
+                },
+                "pinned stat filter must match the requested stat_id"
+            );
+        }
     }
 }
