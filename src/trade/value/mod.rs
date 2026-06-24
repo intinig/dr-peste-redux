@@ -196,14 +196,22 @@ pub fn rebuild_into(
     slot: &RwLock<ValueModel>,
     catalog: &crate::trade::stats::StatCatalog,
 ) {
-    // Learn only from fresh observations: stale postings (old listing age) are
-    // weakly/incorrectly priced and would bias the learned value-drivers. Undated
-    // legacy rows are kept (we can't date them — see `is_fresh_at`).
     let now = now_unix();
     let fresh: Vec<Observation> = log
         .read_all()
         .into_iter()
-        .filter(|o| is_fresh_at(o.indexed.as_deref(), now, MAX_LISTING_AGE_DAYS))
+        // Learn only from rows that are (a) in the priceable band — sub-1-div dust
+        // and absurd trolls carry no signal — and (b) positively dated as fresh.
+        // Unlike the live path, the model treats an absent/unparseable timestamp as
+        // NOT learnable (legacy pre-timestamp rows are cheap-biased), so a present,
+        // parseable, in-window `indexed` is required.
+        .filter(|o| {
+            crate::trade::quality::is_priceable(o.price_divine)
+                && o.indexed.as_deref().is_some_and(|t| {
+                    crate::trade::age::parse_indexed(t).is_some()
+                        && is_fresh_at(Some(t), now, MAX_LISTING_AGE_DAYS)
+                })
+        })
         .collect();
     let model = ValueModel::build(&fresh, catalog);
     let n: usize = model.leagues.values().map(HashMap::len).sum();
@@ -645,6 +653,42 @@ mod tests {
         // "drv" is a value-driver; "filler" (on everything) is not.
         assert!(cat.drivers().any(|s| s.stat_id == "drv"));
         assert!(!cat.drivers().any(|s| s.stat_id == "filler"));
+    }
+
+    #[test]
+    fn rebuild_into_drops_sub_one_div_and_undated_observations() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = ObservationLog::new(dir.path().join("obs.jsonl"));
+        // 15 clean, fresh, in-band rows → kept.
+        for _ in 0..15 {
+            log.append(&Observation {
+                indexed: Some("2099-01-01T00:00:00Z".into()), // future → always fresh
+                ..ob("Staff", 30.0, &["explicit.a"])
+            })
+            .unwrap();
+        }
+        // 5 fresh but sub-1-div rows → dropped by is_priceable.
+        for _ in 0..5 {
+            log.append(&Observation {
+                indexed: Some("2099-01-01T00:00:00Z".into()),
+                ..ob("Staff", 0.5, &["explicit.a"])
+            })
+            .unwrap();
+        }
+        // 7 undated rows (ob() defaults indexed: None) → dropped by timestamp-required rule.
+        for _ in 0..7 {
+            log.append(&ob("Staff", 30.0, &["explicit.a"])).unwrap();
+        }
+        let slot = RwLock::new(ValueModel::default());
+        rebuild_into(&log, &slot, &crate::trade::stats::StatCatalog::default());
+        let model = slot.read().unwrap();
+        let cat = model
+            .category("Standard", "Staff")
+            .expect("Staff category present");
+        assert_eq!(
+            cat.sample_size, 15,
+            "only clean, fresh, in-band, dated rows are learned from"
+        );
     }
 
     #[test]

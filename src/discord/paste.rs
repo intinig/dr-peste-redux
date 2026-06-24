@@ -123,6 +123,20 @@ async fn run_pricing(
         }
     };
 
+    // Sub-1-div items: report "too cheap to price" and stop — skip the precise
+    // breakdown and the learned estimate (we don't care how cheap, just that it is).
+    if est.is_sub_priceable() {
+        reply
+            .edit(
+                *ctx,
+                poise::CreateReply::default()
+                    .content(embeds::sub_one_div_message(&parsed.name))
+                    .components(vec![]),
+            )
+            .await?;
+        return Ok(());
+    }
+
     let secondary_rate = if matches!(est.modal_currency, crate::trade::model::Currency::Divine) {
         None
     } else {

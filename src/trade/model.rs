@@ -161,6 +161,23 @@ pub struct PriceEstimate {
     pub basis: EstimateBasis,
 }
 
+impl PriceEstimate {
+    /// True when we have the item's genuine exact comparables (`CraftTier`) and their
+    /// representative (typical/p50) value is below the priceable floor — too cheap to
+    /// bother estimating precisely.
+    ///
+    /// Gated on `CraftTier` deliberately: when the exact constraint matches nothing,
+    /// `price_check` relaxes to a broad-market sample (`BroadMarket`), whose median is
+    /// NOT evidence the pasted item itself is cheap — a rare item with no exact live
+    /// comps must not be mislabeled "under 1 divine". `listing_count == 0` (no data)
+    /// is likewise not sub-priceable: absence of comps is not evidence of cheapness.
+    pub fn is_sub_priceable(&self) -> bool {
+        self.listing_count > 0
+            && matches!(self.basis, EstimateBasis::CraftTier)
+            && self.typical < crate::trade::quality::MIN_PRICEABLE_DIVINE
+    }
+}
+
 /// Describes how a stat filter was ablated in a breakdown probe.
 /// v1 supports only `Drop` (remove the filter entirely); relaxing a bound
 /// (e.g. lowering the min) is a documented future variant.
@@ -220,5 +237,62 @@ mod tests {
         assert_eq!(Confidence::from_count(15), Confidence::High);
         assert_eq!(Confidence::from_count(5), Confidence::Medium);
         assert_eq!(Confidence::from_count(1), Confidence::Low);
+    }
+
+    #[test]
+    fn is_sub_priceable_only_when_listings_and_cheap() {
+        let base = PriceEstimate {
+            low: 0.1,
+            typical: 0.5,
+            high: 0.9,
+            listing_count: 8,
+            confidence: Confidence::Medium,
+            modal_currency: Currency::Divine,
+            basis: EstimateBasis::CraftTier,
+        };
+        assert!(
+            base.is_sub_priceable(),
+            "cheap with listings → sub-priceable"
+        );
+        assert!(
+            !PriceEstimate {
+                typical: 1.0,
+                ..base.clone()
+            }
+            .is_sub_priceable(),
+            "exactly 1 div → priceable"
+        );
+        assert!(
+            !PriceEstimate {
+                typical: 5.0,
+                ..base.clone()
+            }
+            .is_sub_priceable(),
+            "above floor → not sub-priceable"
+        );
+        assert!(
+            !PriceEstimate {
+                listing_count: 0,
+                ..base.clone()
+            }
+            .is_sub_priceable(),
+            "no listings is unknown, not cheap"
+        );
+        assert!(
+            !PriceEstimate {
+                basis: EstimateBasis::BroadMarket,
+                ..base.clone()
+            }
+            .is_sub_priceable(),
+            "relaxed broad-market fallback (no exact comps) is not evidence the item is cheap"
+        );
+        assert!(
+            !PriceEstimate {
+                basis: EstimateBasis::AffixesOnly,
+                ..base.clone()
+            }
+            .is_sub_priceable(),
+            "non-CraftTier basis does not short-circuit"
+        );
     }
 }
