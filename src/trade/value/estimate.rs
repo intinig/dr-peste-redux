@@ -110,6 +110,16 @@ fn relative_spread(prices: &[f64], center: f64) -> f64 {
 
 #[allow(dead_code)]
 impl crate::trade::value::CategoryModel {
+    pub fn query_from_stats(&self, stats: &[(String, Option<f64>)]) -> Vec<(String, Option<f64>)> {
+        stats
+            .iter()
+            .map(|(id, roll)| {
+                let norm = roll.and_then(|r| self.mod_rolls.get(id).map(|rs| rs.normalize(r)));
+                (id.clone(), norm)
+            })
+            .collect()
+    }
+
     pub fn estimate(&self, query: &[(String, Option<f64>)]) -> Option<ValueEstimate> {
         if self.items.is_empty() {
             return None;
@@ -236,5 +246,23 @@ mod tests {
             cat.estimate(&[("a".into(), None)]).is_none(),
             "1 neighbor < MIN_NEIGHBORS"
         );
+    }
+
+    #[test]
+    fn query_normalizes_raw_rolls_via_mod_rolls() {
+        use crate::trade::value::{magnitude::RollStats, CategoryModel};
+        let mod_rolls = {
+            let mut m = std::collections::HashMap::new();
+            m.insert("a".into(), RollStats::from_rolls(&[0.0, 50.0, 100.0]));
+            m
+        };
+        let cat = CategoryModel {
+            mod_rolls,
+            ..Default::default()
+        };
+        let q = cat.query_from_stats(&[("a".into(), Some(100.0)), ("b".into(), None)]);
+        assert_eq!(q[0].0, "a");
+        assert!((q[0].1.unwrap() - 1.0).abs() < 1e-9);
+        assert_eq!(q[1], ("b".into(), None)); // unknown mod → roll passes as None
     }
 }
