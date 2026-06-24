@@ -184,7 +184,7 @@ impl ValueModel {
     /// Test-only: build a model holding a single pre-constructed `CategoryModel`,
     /// keyed by `(league, canonical_category(category))`. Lets tests exercise the
     /// trust bar directly (e.g. a category that clears the sample-size gate but
-    /// carries a high `loo_error`) without round-tripping a synthetic corpus.
+    /// shows no positive skill in its `calibration`) without round-tripping a synthetic corpus.
     #[cfg(test)]
     pub(crate) fn with_category(league: &str, cat: CategoryModel) -> ValueModel {
         let canon = canonical_category(&cat.category);

@@ -92,29 +92,48 @@ fn model_error(items: &[ItemVector], keys: &[String], w: SimWeights) -> Option<f
     median_sorted(&mut errs)
 }
 
-/// Median relative error of the NO-FEATURE baseline: predict each probe by the median
-/// price of all items EXCEPT the probe's mod-set group (same self-exclusion as the model).
-fn baseline_error(items: &[ItemVector], keys: &[String]) -> Option<f64> {
-    let mut errs: Vec<f64> = Vec::new();
+/// Model and baseline error over the SAME held-out probe set: a probe contributes a
+/// (model, baseline) error pair only when the model resolves (>= MIN_NEIGHBORS
+/// out-of-group neighbours). Both predictors use the same mod-set self-exclusion, so
+/// `skill` compares like with like — no optimistic bias from grading the model only
+/// where it is confident while the baseline is graded everywhere.
+fn calibrate(items: &[ItemVector], keys: &[String], w: SimWeights) -> Calibration {
+    let mut model_errs: Vec<f64> = Vec::new();
+    let mut base_errs: Vec<f64> = Vec::new();
     for &i in &probe_indices(items.len()) {
         let actual = items[i].price_divine;
         if actual <= 0.0 {
             continue;
         }
+        let Some(pred) = predict_one(items, keys, i, w) else {
+            continue;
+        };
         let mut others: Vec<f64> = items
             .iter()
             .enumerate()
             .filter(|(j, _)| keys[*j] != keys[i])
             .map(|(_, it)| it.price_divine)
             .collect();
-        if let Some(m) = median_sorted(&mut others) {
-            errs.push((m - actual).abs() / actual);
-        }
+        let Some(base) = median_sorted(&mut others) else {
+            continue;
+        };
+        model_errs.push((pred - actual).abs() / actual);
+        base_errs.push((base - actual).abs() / actual);
     }
-    if errs.is_empty() {
-        return None;
+    if model_errs.len() < MIN_NEIGHBORS {
+        return Calibration::default();
     }
-    median_sorted(&mut errs)
+    let model_err = median_sorted(&mut model_errs);
+    let baseline_err = median_sorted(&mut base_errs);
+    let skill = match (model_err, baseline_err) {
+        (Some(m), Some(b)) if b > 0.0 => Some((b - m) / b),
+        _ => None,
+    };
+    Calibration {
+        model_err,
+        baseline_err,
+        skill,
+    }
 }
 
 /// Per-category calibration: model error, no-feature baseline error, and skill =
@@ -147,19 +166,7 @@ pub fn tune_and_calibrate(items: &[ItemVector]) -> (SimWeights, Calibration) {
             }
         }
     }
-    let baseline_err = baseline_error(items, &keys);
-    let skill = match (model_err, baseline_err) {
-        (Some(m), Some(b)) if b > 0.0 => Some((b - m) / b),
-        _ => None,
-    };
-    (
-        best_w,
-        Calibration {
-            model_err,
-            baseline_err,
-            skill,
-        },
-    )
+    (best_w, calibrate(items, &keys, best_w))
 }
 
 #[cfg(test)]

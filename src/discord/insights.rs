@@ -164,6 +164,8 @@ mod tests {
     fn calibration_line_shows_skill_and_beats_verdict() {
         let line = calibration_line(&cat("Staff", 2087, Some(0.75), Some(0.88), Some(0.15)));
         assert!(line.contains("n=2087"), "{line}");
+        assert!(line.contains("model 75%"), "{line}");
+        assert!(line.contains("base 88%"), "{line}");
         assert!(line.contains("skill"), "{line}");
         assert!(line.contains("15%"), "{line}");
         assert!(
