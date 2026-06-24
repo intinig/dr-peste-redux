@@ -297,6 +297,13 @@ impl TradeClient {
                                 return None;
                             }
                         }
+                        // Drop listings outside the priceable band: sub-1-div items
+                        // (not worth pricing or learning from) and absurd troll prices
+                        // the mirror-tier filter can't catch when the mirror rate is
+                        // unavailable. See `crate::trade::quality`.
+                        if !crate::trade::quality::is_priceable(price_divine) {
+                            return None;
+                        }
                         drop(rates);
                         let item = entry.get("item");
                         // Drop listings with veiled/unrevealed mods — their stats
@@ -747,6 +754,30 @@ mod tests {
         let ls = client.parse_fetch(&v);
         assert_eq!(ls.len(), 1);
         assert_eq!(ls[0].id, "real");
+    }
+
+    #[test]
+    fn parse_fetch_drops_sub_one_div_and_absurd_listings() {
+        let client = test_client();
+        let v = serde_json::json!({
+            "result": [
+                // 0.5 div (5 chaos) → sub-1-div → dropped
+                { "listing": { "price": { "amount": 5.0, "currency": "chaos" } },
+                  "item": { "explicitMods": ["a"] } },
+                // 0.5 div (divine) → sub-1-div → dropped
+                { "listing": { "price": { "amount": 0.5, "currency": "divine" } },
+                  "item": { "explicitMods": ["b"] } },
+                // 200000 div, mirror rate unavailable → ≥ ABSURD_DIVINE_CAP → dropped
+                { "listing": { "price": { "amount": 200000.0, "currency": "divine" } },
+                  "item": { "explicitMods": ["c"] } },
+                // 3 div → in band → kept
+                { "listing": { "price": { "amount": 3.0, "currency": "divine" } },
+                  "item": { "explicitMods": ["d", "e"] } }
+            ]
+        });
+        let ls = client.parse_fetch(&v);
+        assert_eq!(ls.len(), 1, "only the 3-div in-band listing survives");
+        assert_eq!(ls[0].price_divine, 3.0);
     }
 
     #[test]
