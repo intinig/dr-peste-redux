@@ -21,6 +21,11 @@ pub const MIN_STAT_SAMPLE: usize = 15;
 pub const DRIVER_LIFT: f64 = 1.5;
 /// How many co-occurrence pairs to retain per category.
 const TOP_COOCCURRENCE: usize = 8;
+/// Number of evenly-spaced quantile knots stored per mod for roll-magnitude normalization.
+#[allow(dead_code)]
+pub const ROLL_QUANTILES: usize = 21;
+
+pub mod magnitude;
 
 /// Per-stat value signal within a category.
 #[derive(Debug, Default, Clone)]
