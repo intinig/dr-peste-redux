@@ -790,7 +790,7 @@ mod tests {
                 indexed: None,
             })
             .collect();
-        crate::trade::value::ValueModel::build(&obs)
+        crate::trade::value::ValueModel::build(&obs, &crate::trade::stats::StatCatalog::default())
     }
 
     fn staff_item_with_stat(stat_raw: &str, stat_value: f64) -> ParsedItem {
@@ -873,7 +873,10 @@ mod tests {
                 indexed: None,
             })
             .collect();
-        let model = crate::trade::value::ValueModel::build(&obs);
+        let model = crate::trade::value::ValueModel::build(
+            &obs,
+            &crate::trade::stats::StatCatalog::default(),
+        );
 
         let catalog = StatCatalog::from_json(include_str!("fixtures/stats_sample.json")).unwrap();
         let dir = tempfile::tempdir().unwrap();

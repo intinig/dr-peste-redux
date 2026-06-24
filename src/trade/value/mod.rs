@@ -35,6 +35,9 @@ pub const MIN_NEIGHBORS: usize = 5;
 pub const TRUST_MIN_SAMPLE: usize = 80;
 /// Maximum `loo_error` for a `CategoryModel` to be trusted by `learned_estimate`.
 pub const TRUST_MAX_ERROR: f64 = 0.50;
+/// Relative divergence threshold between the learned corpus estimate and the
+/// live trade price above which the embed flags a warning.
+pub const DIVERGENCE_FLAG: f64 = 0.50;
 
 pub mod backtest;
 pub mod estimate;
@@ -150,7 +153,10 @@ impl ValueModel {
         v
     }
 
-    pub fn build(observations: &[Observation]) -> ValueModel {
+    pub fn build(
+        observations: &[Observation],
+        catalog: &crate::trade::stats::StatCatalog,
+    ) -> ValueModel {
         // Group by league, then canonical category.
         let mut by_league: HashMap<String, HashMap<String, Vec<&Observation>>> = HashMap::new();
         for o in observations {
@@ -168,7 +174,7 @@ impl ValueModel {
         for (league, by_cat) in by_league {
             let mut categories = HashMap::new();
             for (category, obs) in by_cat {
-                categories.insert(category.clone(), build_category(category, &obs));
+                categories.insert(category.clone(), build_category(category, &obs, catalog));
             }
             leagues.insert(league, categories);
         }
@@ -190,7 +196,11 @@ impl ValueModel {
     }
 }
 
-pub fn rebuild_into(log: &ObservationLog, slot: &RwLock<ValueModel>) {
+pub fn rebuild_into(
+    log: &ObservationLog,
+    slot: &RwLock<ValueModel>,
+    catalog: &crate::trade::stats::StatCatalog,
+) {
     // Learn only from fresh observations: stale postings (old listing age) are
     // weakly/incorrectly priced and would bias the learned value-drivers. Undated
     // legacy rows are kept (we can't date them — see `is_fresh_at`).
@@ -200,13 +210,17 @@ pub fn rebuild_into(log: &ObservationLog, slot: &RwLock<ValueModel>) {
         .into_iter()
         .filter(|o| is_fresh_at(o.indexed.as_deref(), now, MAX_LISTING_AGE_DAYS))
         .collect();
-    let model = ValueModel::build(&fresh);
+    let model = ValueModel::build(&fresh, catalog);
     let n: usize = model.leagues.values().map(HashMap::len).sum();
     *slot.write().unwrap_or_else(|e| e.into_inner()) = model;
     tracing::info!(categories = n, "value model rebuilt");
 }
 
-fn build_category(category: String, obs: &[&Observation]) -> CategoryModel {
+fn build_category(
+    category: String,
+    obs: &[&Observation],
+    catalog: &crate::trade::stats::StatCatalog,
+) -> CategoryModel {
     let sample_size = obs.len();
     let prices: Vec<f64> = obs.iter().map(|o| o.price_divine).collect();
     let base_median = median(&prices);
@@ -278,7 +292,7 @@ fn build_category(category: String, obs: &[&Observation]) -> CategoryModel {
             let top_decile_freq = *top_count.get(*id).unwrap_or(&0) as f64 / decile_n as f64;
             StatValue {
                 stat_id: (*id).to_string(),
-                label: None,
+                label: catalog.label_for(id).map(str::to_owned),
                 count: with.len(),
                 median_with,
                 lift,
@@ -542,7 +556,7 @@ mod tests {
             .unwrap();
         }
         let slot = RwLock::new(ValueModel::default());
-        rebuild_into(&log, &slot);
+        rebuild_into(&log, &slot, &crate::trade::stats::StatCatalog::default());
         let model = slot.read().unwrap();
         let cat = model
             .category("Standard", "Staff")
@@ -562,7 +576,7 @@ mod tests {
             ob("Staff", 3.0, &["explicit.a"]),
             ob("Staff", 5.0, &["explicit.b"]),
         ];
-        let model = ValueModel::build(&corpus);
+        let model = ValueModel::build(&corpus, &crate::trade::stats::StatCatalog::default());
         let cat = model
             .category("Standard", "Staff")
             .expect("Staff category present");
@@ -588,7 +602,7 @@ mod tests {
                 ..ob("Staff", 1.0, &["other"])
             });
         }
-        let model = ValueModel::build(&corpus);
+        let model = ValueModel::build(&corpus, &crate::trade::stats::StatCatalog::default());
         // Each league has its own Staff model.
         assert_eq!(model.category("Old", "Staff").unwrap().sample_size, 30);
         assert_eq!(model.category("New", "Staff").unwrap().sample_size, 30);
@@ -620,7 +634,7 @@ mod tests {
         for _ in 0..40 {
             corpus.push(ob("Staff", 10.0, &["drv", "filler"]));
         }
-        let model = ValueModel::build(&corpus);
+        let model = ValueModel::build(&corpus, &crate::trade::stats::StatCatalog::default());
         let cat = model.category("Standard", "Staff").unwrap();
         let drv = cat.stats.iter().find(|s| s.stat_id == "drv").unwrap();
         assert_eq!(drv.count, 40);
@@ -652,7 +666,7 @@ mod tests {
             corpus.push(ob("Staff", 10.0, &["A", "base"])); // A alone, still expensive
         }
         // B never appears without A, and contributes nothing on its own.
-        let model = ValueModel::build(&corpus);
+        let model = ValueModel::build(&corpus, &crate::trade::stats::StatCatalog::default());
         let cat = model.category("Standard", "Staff").unwrap();
         let a = cat.stats.iter().find(|s| s.stat_id == "A").unwrap();
         let b = cat.stats.iter().find(|s| s.stat_id == "B").unwrap();

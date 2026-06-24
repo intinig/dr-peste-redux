@@ -134,6 +134,8 @@ async fn run_pricing(
             .and_then(|r| r.to_divine(1.0, &code))
     };
 
+    let learned = pricer.learned_estimate(parsed, &league.name);
+
     let button = serenity::CreateButton::new("drp_breakdown")
         .label("Break it down")
         .style(serenity::ButtonStyle::Secondary);
@@ -144,7 +146,13 @@ async fn run_pricing(
         .edit(
             *ctx,
             poise::CreateReply::default()
-                .embed(embeds::estimate_embed(parsed, &est, league, secondary_rate))
+                .embed(embeds::estimate_embed(
+                    parsed,
+                    &est,
+                    league,
+                    secondary_rate,
+                    learned.as_ref(),
+                ))
                 .components(vec![row]),
         )
         .await?;
@@ -184,7 +192,13 @@ async fn run_pricing(
                 .edit(
                     *ctx,
                     poise::CreateReply::default()
-                        .embed(embeds::estimate_embed(parsed, &est, league, secondary_rate))
+                        .embed(embeds::estimate_embed(
+                            parsed,
+                            &est,
+                            league,
+                            secondary_rate,
+                            learned.as_ref(),
+                        ))
                         .components(vec![]),
                 )
                 .await?;
@@ -194,7 +208,13 @@ async fn run_pricing(
                 .edit(
                     *ctx,
                     poise::CreateReply::default()
-                        .embed(embeds::estimate_embed(parsed, &est, league, secondary_rate))
+                        .embed(embeds::estimate_embed(
+                            parsed,
+                            &est,
+                            league,
+                            secondary_rate,
+                            learned.as_ref(),
+                        ))
                         .components(vec![]),
                 )
                 .await?;

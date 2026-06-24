@@ -60,12 +60,13 @@ fn spawn_refresher(
 fn spawn_value_refresher(
     log: ObservationLog,
     value: std::sync::Arc<std::sync::RwLock<ValueModel>>,
+    catalog: std::sync::Arc<trade::stats::StatCatalog>,
     interval: Duration,
 ) {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(interval).await;
-            rebuild_into(&log, &value);
+            rebuild_into(&log, &value, &catalog);
         }
     });
 }
@@ -109,17 +110,23 @@ async fn main() -> Result<()> {
         }
     };
     let value = std::sync::Arc::new(std::sync::RwLock::new(ValueModel::default()));
-    rebuild_into(&ObservationLog::new(&config.observation_log_path), &value); // startup build
+    let catalog_arc = std::sync::Arc::new(catalog);
+    rebuild_into(
+        &ObservationLog::new(&config.observation_log_path),
+        &value,
+        &catalog_arc,
+    ); // startup build
     spawn_value_refresher(
         ObservationLog::new(&config.observation_log_path),
         value.clone(),
+        catalog_arc.clone(),
         Duration::from_secs(VALUE_REFRESH_MINS * 60),
     );
 
     let pricer = std::sync::Arc::new(TradePricer::new(
         trade_client,
         PseudoMap::load(),
-        catalog,
+        (*catalog_arc).clone(),
         ObservationLog::new(&config.observation_log_path),
         value.clone(),
     ));

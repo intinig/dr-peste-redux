@@ -120,6 +120,37 @@ pub fn contribution_line(c: &Contribution) -> String {
     format!("• {} — ~{:.1} div", c.characteristic, c.delta_divine)
 }
 
+/// Formats a single-line summary for the learned corpus estimate.
+/// `live` is the "fair" price from the live estimate (for divergence detection).
+/// Returns an empty string when `learned` is `None`.
+pub fn learned_line(
+    learned: Option<&crate::trade::value::estimate::ValueEstimate>,
+    live: Option<f64>,
+) -> String {
+    let Some(est) = learned else {
+        return String::new();
+    };
+    use crate::trade::value::estimate::Confidence;
+    let conf = match est.confidence {
+        Confidence::High => "High",
+        Confidence::Medium => "Medium",
+        Confidence::Low => "Low",
+    };
+    let mut line = format!(
+        "{:.2} div · confidence {} · {} comps",
+        est.value_divine, conf, est.neighbors
+    );
+    if let Some(live_price) = live {
+        if live_price > 0.0
+            && (est.value_divine - live_price).abs() / live_price
+                > crate::trade::value::DIVERGENCE_FLAG
+        {
+            line.push_str(" · ⚠ diverges from live");
+        }
+    }
+    line
+}
+
 /// One-line description of which comparable set the estimate used.
 fn tier_note(parsed: &ParsedItem, est: &PriceEstimate) -> String {
     use crate::trade::model::EstimateBasis::*;
@@ -146,6 +177,7 @@ pub fn estimate_embed(
     est: &PriceEstimate,
     league: &League,
     secondary_rate: Option<f64>,
+    learned: Option<&crate::trade::value::estimate::ValueEstimate>,
 ) -> serenity::CreateEmbed {
     let title = parsed
         .base_type
@@ -154,6 +186,15 @@ pub fn estimate_embed(
     let mut embed = serenity::CreateEmbed::default()
         .title(title)
         .description(format!("**{}**", parsed.name));
+
+    // When live ablation returns no listings, there is no live price to compare
+    // against, so `live` is None (divergence flag is suppressed). Otherwise the
+    // headline "Fair" price (`est.typical`) is the comparison basis.
+    let live = if est.listing_count == 0 {
+        None
+    } else {
+        Some(est.typical)
+    };
 
     if est.listing_count == 0 {
         embed = embed.field("Estimated value", "No comparable listings found", false);
@@ -184,6 +225,14 @@ pub fn estimate_embed(
                 false,
             )
             .field("Priced as", tier_note(parsed, est), false);
+    }
+
+    // The learned/corpus estimate is shown regardless of `listing_count` — it is
+    // the fallback precisely when live trade returns nothing. `learned == None`
+    // adds no field (regression-identical to the pre-Task-9 embed).
+    let line = learned_line(learned, live);
+    if !line.is_empty() {
+        embed = embed.field("Learned (corpus)", line, false);
     }
 
     embed.footer(serenity::CreateEmbedFooter::new(format!(
@@ -336,5 +385,111 @@ mod tests {
         let p = parse(BOOTS).unwrap();
         let note = tier_note(&p, &est(EstimateBasis::BroadMarket, 30));
         assert!(note.to_lowercase().contains("broad-market"), "{note}");
+    }
+
+    use crate::trade::value::estimate::{Confidence as VConf, ValueEstimate};
+
+    fn make_vest(value: f64, conf: VConf, neighbors: usize) -> ValueEstimate {
+        ValueEstimate {
+            value_divine: value,
+            confidence: conf,
+            neighbors,
+        }
+    }
+
+    #[test]
+    fn learned_line_with_some_includes_value_and_conf() {
+        let ve = make_vest(3.5, VConf::High, 12);
+        let line = learned_line(Some(&ve), Some(3.5));
+        assert!(line.contains("3.50 div"), "{line}");
+        assert!(line.contains("High"), "{line}");
+        assert!(line.contains("12 comps"), "{line}");
+        // No divergence: same value
+        assert!(!line.contains("diverges"), "{line}");
+    }
+
+    #[test]
+    fn learned_line_with_none_is_empty() {
+        assert_eq!(learned_line(None, Some(3.5)), "");
+    }
+
+    #[test]
+    fn learned_line_flags_divergence_when_large() {
+        // live = 2.0 div, learned = 5.0 div → 150% divergence > 50% flag
+        let ve = make_vest(5.0, VConf::Medium, 8);
+        let line = learned_line(Some(&ve), Some(2.0));
+        assert!(line.contains("diverges"), "{line}");
+    }
+
+    #[test]
+    fn learned_line_no_divergence_flag_when_within_threshold() {
+        // live = 2.0 div, learned = 2.8 div → 40% divergence < 50% flag
+        let ve = make_vest(2.8, VConf::Low, 5);
+        let line = learned_line(Some(&ve), Some(2.0));
+        assert!(!line.contains("diverges"), "{line}");
+    }
+
+    fn league() -> crate::poeninja::League {
+        crate::poeninja::League {
+            name: "Standard".into(),
+            url: "standard".into(),
+        }
+    }
+
+    #[test]
+    fn estimate_embed_with_learned_adds_field() {
+        let p = parse(BOOTS).unwrap();
+        let e = est(EstimateBasis::CraftTier, 15);
+        let ve = make_vest(3.0, VConf::High, 10);
+        let embed = estimate_embed(&p, &e, &league(), None, Some(&ve));
+        // Serenity CreateEmbed exposes fields via .0 JSON; we build it into JSON
+        // and check the "Learned (corpus)" key is present.
+        let json = serde_json::to_string(&embed).unwrap();
+        assert!(json.contains("Learned (corpus)"), "field missing: {json}");
+    }
+
+    #[test]
+    fn estimate_embed_without_learned_omits_field() {
+        let p = parse(BOOTS).unwrap();
+        let e = est(EstimateBasis::CraftTier, 15);
+        let embed = estimate_embed(&p, &e, &league(), None, None);
+        let json = serde_json::to_string(&embed).unwrap();
+        assert!(
+            !json.contains("Learned (corpus)"),
+            "unexpected field: {json}"
+        );
+    }
+
+    #[test]
+    fn estimate_embed_with_learned_and_zero_listings() {
+        // Live ablation returned nothing (listing_count == 0): the learned/corpus
+        // estimate is the fallback and MUST still be shown, with NO divergence
+        // flag (no live price to compare against).
+        let p = parse(BOOTS).unwrap();
+        let e = est(EstimateBasis::CraftTier, 0);
+        let ve = make_vest(3.0, VConf::High, 10);
+        let embed = estimate_embed(&p, &e, &league(), None, Some(&ve));
+        let json = serde_json::to_string(&embed).unwrap();
+        assert!(
+            json.contains("Learned (corpus)"),
+            "field missing on zero-listing fallback: {json}"
+        );
+        assert!(
+            !json.contains("diverges"),
+            "no divergence flag without a live price: {json}"
+        );
+    }
+
+    #[test]
+    fn estimate_embed_without_learned_and_zero_listings_omits_field() {
+        // Regression: zero listings + no learned estimate → no learned field.
+        let p = parse(BOOTS).unwrap();
+        let e = est(EstimateBasis::CraftTier, 0);
+        let embed = estimate_embed(&p, &e, &league(), None, None);
+        let json = serde_json::to_string(&embed).unwrap();
+        assert!(
+            !json.contains("Learned (corpus)"),
+            "unexpected field: {json}"
+        );
     }
 }

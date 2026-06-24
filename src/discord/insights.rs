@@ -39,6 +39,72 @@ pub async fn autocomplete_insights_category<'a>(
     futures::stream::iter(names)
 }
 
+/// Formats the undersampled-gate section for a category's insights body.
+/// Returns an empty string when there are no gate candidates.
+pub fn gate_section(
+    gates: &[crate::trade::value::gates::GateCandidate],
+    catalog: &crate::trade::stats::StatCatalog,
+) -> String {
+    if gates.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("\n**Undersampled gates** (need more data):\n");
+    for g in gates.iter().take(8) {
+        let lbl = g
+            .label
+            .as_deref()
+            .or_else(|| catalog.label_for(&g.stat_id))
+            .unwrap_or(&g.stat_id);
+        out.push_str(&format!("• {} (n={})\n", lbl, g.count));
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::trade::stats::StatCatalog;
+    use crate::trade::value::gates::GateCandidate;
+
+    fn gate(stat_id: &str, label: Option<&str>, count: usize) -> GateCandidate {
+        GateCandidate {
+            stat_id: stat_id.into(),
+            label: label.map(str::to_owned),
+            count,
+        }
+    }
+
+    #[test]
+    fn gate_section_non_empty_when_gates_present() {
+        let catalog = StatCatalog::default();
+        let gates = vec![
+            gate("explicit.stat_1234", Some("increased Fire Damage"), 3),
+            gate("explicit.stat_5678", None, 7),
+        ];
+        let section = gate_section(&gates, &catalog);
+        assert!(
+            section.contains("Undersampled gates"),
+            "section header missing: {section}"
+        );
+        assert!(
+            section.contains("increased Fire Damage"),
+            "label missing: {section}"
+        );
+        assert!(section.contains("n=3"), "count missing: {section}");
+        // Falls back to stat_id when label is None
+        assert!(
+            section.contains("explicit.stat_5678"),
+            "fallback id missing: {section}"
+        );
+    }
+
+    #[test]
+    fn gate_section_empty_when_no_gates() {
+        let catalog = StatCatalog::default();
+        assert_eq!(gate_section(&[], &catalog), "");
+    }
+}
+
 /// Show learned value-drivers for a category (or list categories with no arg).
 #[poise::command(slash_command)]
 pub async fn insights(
@@ -142,6 +208,7 @@ pub async fn insights(
                                 ));
                             }
                         }
+                        body.push_str(&gate_section(&cat.undersampled_gates, catalog));
                         serenity::CreateEmbed::default()
                             .title(format!("{canon} — value drivers"))
                             .description(body)

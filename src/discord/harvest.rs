@@ -69,10 +69,12 @@ pub async fn harvest(
             // read + aggregation shouldn't block the runtime worker thread.
             let log_path = data.config.observation_log_path.clone();
             let value = data.value.clone();
+            let catalog = data.pricer.catalog().clone();
             let _ = tokio::task::spawn_blocking(move || {
                 crate::trade::value::rebuild_into(
                     &crate::observe::ObservationLog::new(&log_path),
                     &value,
+                    &catalog,
                 );
             })
             .await;

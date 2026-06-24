@@ -922,7 +922,7 @@ mod tests {
 
         // sample_size = 55 >= MIN_CATEGORY_SAMPLE(50). ✓
         assert!(obs.len() >= MIN_CATEGORY_SAMPLE);
-        crate::trade::value::ValueModel::build(&obs)
+        crate::trade::value::ValueModel::build(&obs, &crate::trade::stats::StatCatalog::default())
     }
 
     #[test]
