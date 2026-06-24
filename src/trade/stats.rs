@@ -112,12 +112,20 @@ impl StatCatalog {
         let mut groups: HashMap<StatGroup, HashMap<String, String>> = HashMap::new();
         let mut labels: HashMap<String, String> = HashMap::new();
         for g in &raw.result {
+            // Reverse id→text labels are indexed for EVERY group, so /insights can
+            // render value-drivers and undersampled gates from any affix group
+            // (desecrated, crafted, fractured, …) — not only the clipboard-matchable
+            // ones — with human text instead of raw `desecrated.stat_…` ids.
+            for e in &g.entries {
+                labels.entry(e.id.clone()).or_insert_with(|| e.text.clone());
+            }
+            // The clipboard-match map (normalized text → id) stays limited to the
+            // groups we price/match against.
             if let Some(sg) = want.iter().copied().find(|s| s.json_id() == g.id) {
                 let map = groups.entry(sg).or_default();
                 for e in &g.entries {
                     map.entry(normalize(&e.text))
                         .or_insert_with(|| e.id.clone());
-                    labels.entry(e.id.clone()).or_insert_with(|| e.text.clone());
                 }
             }
         }
@@ -255,6 +263,37 @@ mod tests {
             Some("# to maximum Life")
         );
         assert_eq!(c.label_for("explicit.stat_nope"), None);
+    }
+
+    #[test]
+    fn label_for_resolves_non_matchable_groups() {
+        // /insights renders value-drivers + undersampled gates from desecrated/crafted/
+        // fractured mods — affix groups that are NOT clipboard-matchable (no StatGroup
+        // variant). label_for must still resolve their display text, or the embed shows
+        // raw `desecrated.stat_…` ids instead of human labels.
+        let json = r##"{"result":[
+            {"id":"explicit","entries":[{"id":"explicit.stat_1","text":"+# to maximum Mana"}]},
+            {"id":"desecrated","entries":[{"id":"desecrated.stat_3544050945","text":"+# to Level of all Spell Skills"}]},
+            {"id":"crafted","entries":[{"id":"crafted.stat_1158842087","text":"#% increased Spell Damage"}]},
+            {"id":"fractured","entries":[{"id":"fractured.stat_9","text":"+# to Intelligence"}]}
+        ]}"##;
+        let c = StatCatalog::from_json(json).unwrap();
+        assert_eq!(
+            c.label_for("desecrated.stat_3544050945"),
+            Some("+# to Level of all Spell Skills")
+        );
+        assert_eq!(
+            c.label_for("crafted.stat_1158842087"),
+            Some("#% increased Spell Damage")
+        );
+        assert_eq!(c.label_for("fractured.stat_9"), Some("+# to Intelligence"));
+        // explicit stays both matchable and labeled.
+        assert_eq!(c.label_for("explicit.stat_1"), Some("+# to maximum Mana"));
+        // A non-matchable group's mod text is NOT added to the clipboard-match map.
+        assert_eq!(
+            c.match_stat("#% increased Spell Damage", StatGroup::Explicit),
+            None
+        );
     }
 
     #[tokio::test]
