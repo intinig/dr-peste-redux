@@ -28,12 +28,35 @@ fn loo_probe_count(n: usize) -> usize {
     n.min(LOO_MAX_PROBES)
 }
 
-fn predict_one(items: &[ItemVector], skip: usize, w: SimWeights) -> Option<f64> {
+/// A stable signature of an item's mod-SET (the set of stat_ids, order-independent),
+/// used to leave the probe's whole exact-mod-set group out of its own evaluation.
+fn mod_keys(items: &[ItemVector]) -> Vec<String> {
+    items
+        .iter()
+        .map(|it| {
+            let mut ids: Vec<&str> = it.mods.iter().map(|(s, _)| s.as_str()).collect();
+            ids.sort_unstable();
+            ids.join("\u{1}")
+        })
+        .collect()
+}
+
+fn median_sorted(v: &mut [f64]) -> Option<f64> {
+    if v.is_empty() {
+        return None;
+    }
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    Some(v[v.len() / 2])
+}
+
+/// k-NN prediction for the probe, EXCLUDING every item sharing the probe's exact mod-set
+/// (self-exclusion: `keys[i] != keys[skip]`), not just the probe itself.
+fn predict_one(items: &[ItemVector], keys: &[String], skip: usize, w: SimWeights) -> Option<f64> {
     let q: Vec<(String, Option<f64>)> = items[skip].mods.clone();
     let mut scored: Vec<(f64, f64)> = items
         .iter()
         .enumerate()
-        .filter(|(i, _)| *i != skip)
+        .filter(|(i, _)| *i != skip && keys[*i] != keys[skip])
         .map(|(_, it)| (similarity(&q, it, w), it.price_divine))
         .filter(|(s, _)| *s > 0.0)
         .collect();
@@ -45,21 +68,20 @@ fn predict_one(items: &[ItemVector], skip: usize, w: SimWeights) -> Option<f64> 
     Some(weighted_median(&scored))
 }
 
-pub fn loo_median_error(items: &[ItemVector], w: SimWeights) -> Option<f64> {
-    let n = items.len();
+/// Evenly-spaced probe indices across [0, n): `k·n/probes` (bounded by LOO_MAX_PROBES,
+/// spread across the whole corpus — see the original loo_median_error note).
+fn probe_indices(n: usize) -> Vec<usize> {
     let probes = loo_probe_count(n);
-    if probes == 0 {
-        return None;
-    }
-    // Evenly-spaced probe indices across [0, n): `k·n/probes`. Each prediction still
-    // searches all other items for neighbours; only the number of held-out probes we
-    // measure error over is bounded (to `probes`), spread across the whole corpus.
-    let mut errs: Vec<f64> = Vec::with_capacity(probes);
-    for k in 0..probes {
-        let i = k * n / probes;
+    (0..probes).map(|k| k * n / probes).collect()
+}
+
+/// Median self-excluded relative error of the k-NN over the probe set.
+fn model_error(items: &[ItemVector], keys: &[String], w: SimWeights) -> Option<f64> {
+    let mut errs: Vec<f64> = Vec::new();
+    for &i in &probe_indices(items.len()) {
         let actual = items[i].price_divine;
         if actual > 0.0 {
-            if let Some(pred) = predict_one(items, i, w) {
+            if let Some(pred) = predict_one(items, keys, i, w) {
                 errs.push((pred - actual).abs() / actual);
             }
         }
@@ -67,35 +89,173 @@ pub fn loo_median_error(items: &[ItemVector], w: SimWeights) -> Option<f64> {
     if errs.len() < MIN_NEIGHBORS {
         return None;
     }
-    errs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    Some(errs[errs.len() / 2])
+    median_sorted(&mut errs)
 }
 
-pub fn tune_weights(items: &[ItemVector]) -> (SimWeights, Option<f64>) {
-    let mut best = (
-        SimWeights {
-            jaccard: 1.0,
-            roll: 0.0,
-        },
-        None::<f64>,
-    );
+/// Median relative error of the NO-FEATURE baseline: predict each probe by the median
+/// price of all items EXCEPT the probe's mod-set group (same self-exclusion as the model).
+fn baseline_error(items: &[ItemVector], keys: &[String]) -> Option<f64> {
+    let mut errs: Vec<f64> = Vec::new();
+    for &i in &probe_indices(items.len()) {
+        let actual = items[i].price_divine;
+        if actual <= 0.0 {
+            continue;
+        }
+        let mut others: Vec<f64> = items
+            .iter()
+            .enumerate()
+            .filter(|(j, _)| keys[*j] != keys[i])
+            .map(|(_, it)| it.price_divine)
+            .collect();
+        if let Some(m) = median_sorted(&mut others) {
+            errs.push((m - actual).abs() / actual);
+        }
+    }
+    if errs.is_empty() {
+        return None;
+    }
+    median_sorted(&mut errs)
+}
+
+/// Per-category calibration: model error, no-feature baseline error, and skill =
+/// fraction of baseline error the model removes (`> 0` ⇒ beats guessing the median).
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct Calibration {
+    pub model_err: Option<f64>,
+    pub baseline_err: Option<f64>,
+    pub skill: Option<f64>,
+}
+
+/// Pick similarity weights by minimizing self-excluded model error, then compute the
+/// baseline error and skill over the same probe set.
+pub fn tune_and_calibrate(items: &[ItemVector]) -> (SimWeights, Calibration) {
+    let keys = mod_keys(items);
+    let mut best_w = SimWeights {
+        jaccard: 1.0,
+        roll: 0.0,
+    };
+    let mut model_err: Option<f64> = None;
     for (j, r) in WEIGHT_GRID {
         let w = SimWeights {
             jaccard: j,
             roll: r,
         };
-        if let Some(e) = loo_median_error(items, w) {
-            if best.1.map(|b| e < b).unwrap_or(true) {
-                best = (w, Some(e));
+        if let Some(e) = model_error(items, &keys, w) {
+            if model_err.map(|b| e < b).unwrap_or(true) {
+                model_err = Some(e);
+                best_w = w;
             }
         }
     }
-    best
+    let baseline_err = baseline_error(items, &keys);
+    let skill = match (model_err, baseline_err) {
+        (Some(m), Some(b)) if b > 0.0 => Some((b - m) / b),
+        _ => None,
+    };
+    (
+        best_w,
+        Calibration {
+            model_err,
+            baseline_err,
+            skill,
+        },
+    )
+}
+
+/// Compatibility shim kept for the `value/mod.rs` caller that Task 2 will migrate.
+/// Delegates to `tune_and_calibrate` and returns `(weights, model_err)`.
+/// Remove this once `CategoryModel` carries a `Calibration` field (Task 2).
+pub fn tune_weights(items: &[ItemVector]) -> (SimWeights, Option<f64>) {
+    let (w, cal) = tune_and_calibrate(items);
+    (w, cal.model_err)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn self_exclusion_drops_same_mod_set_siblings() {
+        // Probe at index 0 (mods {a}, price 100). One sibling (also {a}, price 100) would
+        // make a self-included predictor return 100 (0 error). All OTHER items share NO mods
+        // with the probe (mods {b}, similarity 0) → after self-excluding the {a} group there
+        // are no positive-similarity neighbours, so predict_one returns None and the probe
+        // contributes nothing. Proves siblings are excluded, not used.
+        let mut items = vec![
+            ItemVector {
+                mods: vec![("a".into(), None)],
+                price_divine: 100.0,
+            },
+            ItemVector {
+                mods: vec![("a".into(), None)],
+                price_divine: 100.0,
+            },
+        ];
+        for _ in 0..20 {
+            items.push(ItemVector {
+                mods: vec![("b".into(), None)],
+                price_divine: 1.0,
+            });
+        }
+        let keys = mod_keys(&items);
+        assert!(
+            predict_one(
+                &items,
+                &keys,
+                0,
+                SimWeights {
+                    jaccard: 1.0,
+                    roll: 0.0
+                }
+            )
+            .is_none(),
+            "same-mod-set siblings must be excluded, leaving no similar neighbours"
+        );
+    }
+
+    #[test]
+    fn skill_positive_when_model_beats_median() {
+        // Two well-separated mod-set groups at very different prices, each with enough members
+        // that leave-the-group-out still leaves the OTHER group as neighbours? No — the k-NN
+        // would have no same-set neighbour. Instead: price is a smooth function of a shared
+        // mod's roll, so roll-proximity (within the kept neighbours) predicts far better than
+        // the global median. The grid will pick roll weight and skill must be > 0.
+        let items: Vec<ItemVector> = (0..60)
+            .map(|i| {
+                let r = i as f64 / 59.0;
+                // distinct mod-set per item (so self-exclusion removes only itself), shared mod "a"
+                // carries the price signal via roll; a unique tag mod makes each mod-set unique.
+                ItemVector {
+                    mods: vec![("a".into(), Some(r)), (format!("tag{i}"), None)],
+                    price_divine: 10.0 + 100.0 * r,
+                }
+            })
+            .collect();
+        let (_w, cal) = tune_and_calibrate(&items);
+        assert!(
+            cal.skill.unwrap() > 0.0,
+            "model tracks roll → beats median baseline; skill={:?}",
+            cal.skill
+        );
+    }
+
+    #[test]
+    fn skill_non_positive_when_no_signal() {
+        // Price is independent of mods (random-ish but deterministic), each item a unique
+        // mod-set. The k-NN cannot beat predicting the median → skill <= 0 (or None).
+        let items: Vec<ItemVector> = (0..60)
+            .map(|i| ItemVector {
+                mods: vec![(format!("m{i}"), None)],
+                price_divine: 1.0 + (i % 7) as f64,
+            })
+            .collect();
+        let (_w, cal) = tune_and_calibrate(&items);
+        assert!(
+            cal.skill.map(|s| s <= 0.0).unwrap_or(true),
+            "no signal → skill<=0/None; got {:?}",
+            cal.skill
+        );
+    }
 
     #[test]
     fn tune_picks_roll_weight_for_magnitude_dominant_corpus() {
@@ -120,13 +280,13 @@ mod tests {
                 }
             })
             .collect();
-        let (w, err) = tune_weights(&items);
+        let (w, cal) = tune_and_calibrate(&items);
         assert!(
             w.roll > w.jaccard,
             "magnitude-dominant → roll weight wins (w={:?})",
             w
         );
-        assert!(err.unwrap() < 0.3, "calibrated");
+        assert!(cal.model_err.unwrap() < 0.3, "calibrated");
     }
 
     #[test]
@@ -146,7 +306,7 @@ mod tests {
         for _ in 0..15 {
             items.push(mk(&["a", "b", "c"], 200.0));
         }
-        let (w, _) = tune_weights(&items);
+        let (w, _) = tune_and_calibrate(&items);
         assert!(
             w.jaccard >= w.roll,
             "combination-dominant → jaccard not beaten (w={:?})",
