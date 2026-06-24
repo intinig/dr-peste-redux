@@ -29,6 +29,7 @@ pub const K_NEIGHBORS: usize = 15;
 /// Minimum neighbours required to emit a `ValueEstimate` (otherwise `None`).
 pub const MIN_NEIGHBORS: usize = 5;
 
+pub mod backtest;
 pub mod estimate;
 pub mod gates;
 pub mod itemvec;
@@ -109,10 +110,11 @@ pub struct CategoryModel {
     pub mod_rolls: HashMap<String, magnitude::RollStats>,
     #[allow(dead_code)]
     pub items: Vec<itemvec::ItemVector>,
-    #[allow(dead_code)]
     pub weights: estimate::SimWeights,
     #[allow(dead_code)]
     pub undersampled_gates: Vec<gates::GateCandidate>,
+    #[allow(dead_code)]
+    pub loo_error: Option<f64>,
 }
 
 impl CategoryModel {
@@ -296,6 +298,7 @@ fn build_category(category: String, obs: &[&Observation]) -> CategoryModel {
 
     let mod_rolls = magnitude::build_mod_rolls(obs);
     let items = itemvec::build_item_vectors(obs, &mod_rolls);
+    let (weights, loo_error) = backtest::tune_weights(&items);
 
     CategoryModel {
         category,
@@ -305,8 +308,9 @@ fn build_category(category: String, obs: &[&Observation]) -> CategoryModel {
         cooccurrences,
         mod_rolls,
         items,
-        weights: estimate::SimWeights::default(),
+        weights,
         undersampled_gates: Vec::new(),
+        loo_error,
     }
 }
 
