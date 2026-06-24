@@ -5,14 +5,12 @@ use super::magnitude::RollStats;
 use crate::observe::Observation;
 use std::collections::HashMap;
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct ItemVector {
     pub mods: Vec<(String, Option<f64>)>,
     pub price_divine: f64,
 }
 
-#[allow(dead_code)]
 pub fn build_item_vectors(
     obs: &[&Observation],
     mod_rolls: &HashMap<String, RollStats>,

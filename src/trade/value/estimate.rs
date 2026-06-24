@@ -1,7 +1,6 @@
 //! Similarity-weight parameters for the k-NN estimate (Task 6).
 //! Stub: fields populated to zero by Default; training fills them.
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SimWeights {
     pub jaccard: f64,
@@ -11,7 +10,6 @@ pub struct SimWeights {
 use super::itemvec::ItemVector;
 use std::collections::{HashMap, HashSet};
 
-#[allow(dead_code)]
 impl SimWeights {
     pub fn normalized(self) -> SimWeights {
         let s = self.jaccard + self.roll;
@@ -29,7 +27,6 @@ impl SimWeights {
     }
 }
 
-#[allow(dead_code)]
 pub fn similarity(query: &[(String, Option<f64>)], item: &ItemVector, w: SimWeights) -> f64 {
     if query.is_empty() || item.mods.is_empty() {
         return 0.0;
@@ -62,7 +59,6 @@ pub fn similarity(query: &[(String, Option<f64>)], item: &ItemVector, w: SimWeig
     w.jaccard * jac + w.roll * roll
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Confidence {
     High,
@@ -70,7 +66,6 @@ pub enum Confidence {
     Low,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct ValueEstimate {
     pub value_divine: f64,
@@ -80,7 +75,6 @@ pub struct ValueEstimate {
 
 /// Median of prices weighted by similarity. `scored` is (sim, price), sim>0.
 /// `pub(crate)` so Task 6 (backtest) can reuse it directly.
-#[allow(dead_code)]
 pub(crate) fn weighted_median(scored: &[(f64, f64)]) -> f64 {
     let mut v: Vec<(f64, f64)> = scored.to_vec();
     v.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -98,7 +92,6 @@ pub(crate) fn weighted_median(scored: &[(f64, f64)]) -> f64 {
     v.last().map(|(_, p)| *p).unwrap_or(0.0)
 }
 
-#[allow(dead_code)]
 fn relative_spread(prices: &[f64], center: f64) -> f64 {
     if center <= 0.0 || prices.is_empty() {
         return f64::INFINITY;
@@ -108,7 +101,6 @@ fn relative_spread(prices: &[f64], center: f64) -> f64 {
     dev[dev.len() / 2] / center // median abs deviation / center
 }
 
-#[allow(dead_code)]
 impl crate::trade::value::CategoryModel {
     pub fn query_from_stats(&self, stats: &[(String, Option<f64>)]) -> Vec<(String, Option<f64>)> {
         stats

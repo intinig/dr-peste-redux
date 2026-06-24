@@ -22,6 +22,56 @@ pub async fn autocomplete_harvest_category<'a>(
     futures::stream::iter(names)
 }
 
+/// Autocomplete callback for `/harvest`'s optional `stat_mod` argument. Surfaces the
+/// undersampled-gate candidates the value model has flagged for the active league
+/// (across categories), so the operator picks a flagged mod from a labelled list
+/// instead of pasting a raw `explicit.stat_…` id. Each choice shows
+/// `<category> — <label> (n=<count>)` but submits the bare stat id (the value the
+/// targeted sweep filters on). Gates are few per category, and the operator narrows
+/// by typing, so listing the whole league rather than the in-progress category is fine.
+pub async fn autocomplete_harvest_mod<'a>(
+    ctx: Context<'a>,
+    partial: &'a str,
+) -> impl Stream<Item = poise::serenity_prelude::AutocompleteChoice> + 'a {
+    use poise::serenity_prelude::AutocompleteChoice;
+    let needle = partial.to_lowercase();
+    let mut choices: Vec<AutocompleteChoice> = Vec::new();
+
+    // Active league from the latest snapshot (await BEFORE taking the model read lock,
+    // so no guard is held across an await).
+    if let Some(league) = ctx
+        .data()
+        .store
+        .snapshot()
+        .await
+        .map(|s| s.league.name.clone())
+    {
+        let model = ctx.data().value.read().unwrap_or_else(|e| e.into_inner());
+        let catalog = ctx.data().pricer.catalog();
+        'outer: for cat in model.categories_sorted(&league) {
+            for g in &cat.undersampled_gates {
+                let label = g
+                    .label
+                    .as_deref()
+                    .or_else(|| catalog.label_for(&g.stat_id))
+                    .unwrap_or(&g.stat_id);
+                if needle.is_empty()
+                    || label.to_lowercase().contains(&needle)
+                    || g.stat_id.to_lowercase().contains(&needle)
+                    || cat.category.to_lowercase().contains(&needle)
+                {
+                    let name = format!("{} — {} (n={})", cat.category, label, g.count);
+                    choices.push(AutocompleteChoice::new(name, g.stat_id.clone()));
+                    if choices.len() >= 25 {
+                        break 'outer;
+                    }
+                }
+            }
+        }
+    }
+    futures::stream::iter(choices)
+}
+
 /// Harvest a category into the corpus. Optionally filter by a specific mod stat id.
 #[poise::command(slash_command)]
 pub async fn harvest(
@@ -29,7 +79,8 @@ pub async fn harvest(
     #[description = "Item category (e.g. Staff, Helmet)"]
     #[autocomplete = "autocomplete_harvest_category"]
     category: String,
-    #[description = "Optional: stat id to target (e.g. explicit.stat_…). Filters the sweep to items with this mod."]
+    #[description = "Optional: target a flagged undersampled gate (pick from autocomplete) to deep-sample it."]
+    #[autocomplete = "autocomplete_harvest_mod"]
     stat_mod: Option<String>,
 ) -> Result<(), Error> {
     let data = ctx.data();
