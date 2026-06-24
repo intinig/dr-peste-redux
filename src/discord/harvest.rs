@@ -5,6 +5,21 @@
 use super::{Context, Error};
 use futures::Stream;
 
+/// Discord caps an autocomplete choice's display name at 100 characters; exceeding
+/// it makes the WHOLE autocomplete response fail (Discord returns no suggestions).
+/// Gate labels come from the live stat catalog and can be long, so ellipsize the
+/// display name to stay under the cap. The submitted value (the stat id) is never
+/// touched — only what the operator sees is shortened.
+const MAX_CHOICE_NAME: usize = 100;
+
+fn truncate_choice_name(name: &str) -> String {
+    if name.chars().count() <= MAX_CHOICE_NAME {
+        return name.to_string();
+    }
+    let kept: String = name.chars().take(MAX_CHOICE_NAME - 1).collect();
+    format!("{kept}…")
+}
+
 /// Autocomplete callback for `/harvest`'s category argument. Returns up to 25
 /// trade2 category labels that case-insensitively prefix-match `partial`.
 pub async fn autocomplete_harvest_category<'a>(
@@ -37,30 +52,35 @@ pub async fn autocomplete_harvest_mod<'a>(
     let needle = partial.to_lowercase();
     let mut choices: Vec<AutocompleteChoice> = Vec::new();
 
-    // Active league from the latest snapshot (await BEFORE taking the model read lock,
-    // so no guard is held across an await).
-    if let Some(league) = ctx
-        .data()
-        .store
-        .snapshot()
-        .await
-        .map(|s| s.league.name.clone())
-    {
+    // Active league via the cheap accessor (avoids cloning the whole Snapshot every
+    // keystroke); awaited BEFORE taking the model read lock, so no guard is held
+    // across an await.
+    if let Some(league) = ctx.data().store.league_name().await {
         let model = ctx.data().value.read().unwrap_or_else(|e| e.into_inner());
         let catalog = ctx.data().pricer.catalog();
         'outer: for cat in model.categories_sorted(&league) {
+            // Category is constant across its gates: lowercase it once, and only when
+            // there is a needle to match against.
+            let cat_lower = if needle.is_empty() {
+                String::new()
+            } else {
+                cat.category.to_lowercase()
+            };
             for g in &cat.undersampled_gates {
                 let label = g
                     .label
                     .as_deref()
                     .or_else(|| catalog.label_for(&g.stat_id))
                     .unwrap_or(&g.stat_id);
-                if needle.is_empty()
+                let matches = needle.is_empty()
                     || label.to_lowercase().contains(&needle)
                     || g.stat_id.to_lowercase().contains(&needle)
-                    || cat.category.to_lowercase().contains(&needle)
-                {
-                    let name = format!("{} — {} (n={})", cat.category, label, g.count);
+                    || cat_lower.contains(&needle);
+                if matches {
+                    let name = truncate_choice_name(&format!(
+                        "{} — {} (n={})",
+                        cat.category, label, g.count
+                    ));
                     choices.push(AutocompleteChoice::new(name, g.stat_id.clone()));
                     if choices.len() >= 25 {
                         break 'outer;
@@ -165,4 +185,28 @@ pub async fn harvest(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{truncate_choice_name, MAX_CHOICE_NAME};
+
+    #[test]
+    fn short_names_pass_through_unchanged() {
+        let s = "Staff — +1 to Level of all Spell Skills (n=12)";
+        assert_eq!(truncate_choice_name(s), s);
+    }
+
+    #[test]
+    fn long_names_are_ellipsized_within_the_discord_cap() {
+        let long = format!("Body Armour — {} (n=3)", "very long stat label ".repeat(20));
+        assert!(long.chars().count() > MAX_CHOICE_NAME);
+        let out = truncate_choice_name(&long);
+        assert!(
+            out.chars().count() <= MAX_CHOICE_NAME,
+            "must fit Discord's {MAX_CHOICE_NAME}-char cap (got {})",
+            out.chars().count()
+        );
+        assert!(out.ends_with('…'), "ellipsis marks the truncation");
+    }
 }
