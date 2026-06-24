@@ -3,31 +3,27 @@
 //! everyone (non-secret market data).
 
 use super::{Context, Error};
-use crate::trade::value::{
-    canonical_category, CategoryModel, MIN_CATEGORY_SAMPLE, TRUST_MAX_ERROR, TRUST_MIN_SAMPLE,
-};
+use crate::trade::value::{canonical_category, CategoryModel, MIN_CATEGORY_SAMPLE};
 use futures::Stream;
 use poise::serenity_prelude as serenity;
 
 /// Returns a single calibration line for a category:
-/// `Staff: n=1141, LOO err 31%, weights j/r 0.50/0.50 ✓trusted`
-/// or `Wand: n=42, LOO err 64%, weights j/r 0.75/0.25 ✗untrusted`.
-/// LOO err shows `n/a` when `loo_error` is `None`.
+/// `Staff: n=1141, skill 23%, weights j/r 0.50/0.50 ✓trusted`
+/// or `Wand: n=42, skill n/a, weights j/r 0.75/0.25 ✗untrusted`.
+/// Skill shows `n/a` when `calibration.skill` is `None`.
 pub fn calibration_line(cat: &CategoryModel) -> String {
-    let loo = match cat.loo_error {
-        Some(e) => format!("{:.0}%", e * 100.0),
+    let skill = match cat.calibration.skill {
+        Some(s) => format!("{:.0}%", s * 100.0),
         None => "n/a".to_string(),
     };
-    let trusted =
-        cat.sample_size >= TRUST_MIN_SAMPLE && cat.loo_error.is_some_and(|e| e <= TRUST_MAX_ERROR);
-    let trust_mark = if trusted {
+    let trust_mark = if cat.is_trusted() {
         "✓trusted"
     } else {
         "✗untrusted"
     };
     format!(
-        "{}: n={}, LOO err {}, weights j/r {:.2}/{:.2} {}",
-        cat.category, cat.sample_size, loo, cat.weights.jaccard, cat.weights.roll, trust_mark,
+        "{}: n={}, skill {}, weights j/r {:.2}/{:.2} {}",
+        cat.category, cat.sample_size, skill, cat.weights.jaccard, cat.weights.roll, trust_mark,
     )
 }
 
@@ -138,15 +134,19 @@ mod tests {
     fn make_cat(
         name: &str,
         sample_size: usize,
-        loo_error: Option<f64>,
+        skill: Option<f64>,
         jaccard: f64,
         roll: f64,
     ) -> crate::trade::value::CategoryModel {
+        use crate::trade::value::backtest::Calibration;
         use crate::trade::value::estimate::SimWeights;
         crate::trade::value::CategoryModel {
             category: name.to_owned(),
             sample_size,
-            loo_error,
+            calibration: Calibration {
+                skill,
+                ..Default::default()
+            },
             weights: SimWeights { jaccard, roll },
             ..Default::default()
         }
@@ -154,31 +154,33 @@ mod tests {
 
     #[test]
     fn calibration_line_trusted() {
-        let cat = make_cat("Staff", 1141, Some(0.31), 0.50, 0.50);
+        // 1141 samples + positive skill → trusted
+        let cat = make_cat("Staff", 1141, Some(0.23), 0.50, 0.50);
         let line = calibration_line(&cat);
         assert!(line.contains("Staff:"), "category name: {line}");
         assert!(line.contains("n=1141"), "sample_size: {line}");
-        assert!(line.contains("LOO err 31%"), "loo pct: {line}");
+        assert!(line.contains("skill 23%"), "skill pct: {line}");
         assert!(line.contains("j/r 0.50/0.50"), "weights: {line}");
         assert!(line.contains("✓trusted"), "trust mark: {line}");
     }
 
     #[test]
-    fn calibration_line_untrusted_high_error() {
+    fn calibration_line_untrusted_under_sample() {
+        // 42 samples → untrusted regardless of skill
         let cat = make_cat("Wand", 42, Some(0.64), 0.75, 0.25);
         let line = calibration_line(&cat);
         assert!(line.contains("Wand:"), "category name: {line}");
         assert!(line.contains("n=42"), "sample_size: {line}");
-        assert!(line.contains("LOO err 64%"), "loo pct: {line}");
+        assert!(line.contains("skill 64%"), "skill pct: {line}");
         assert!(line.contains("j/r 0.75/0.25"), "weights: {line}");
         assert!(line.contains("✗untrusted"), "trust mark: {line}");
     }
 
     #[test]
-    fn calibration_line_no_loo_error() {
+    fn calibration_line_no_skill() {
         let cat = make_cat("Bow", 5, None, 1.0, 0.0);
         let line = calibration_line(&cat);
-        assert!(line.contains("LOO err n/a"), "no loo: {line}");
+        assert!(line.contains("skill n/a"), "no skill: {line}");
         assert!(line.contains("✗untrusted"), "trust mark: {line}");
     }
 }

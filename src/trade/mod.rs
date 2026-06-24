@@ -157,9 +157,8 @@ impl<C: Comparables> TradePricer<C> {
     /// Return a k-NN value estimate from the learned `ValueModel` for `item` in
     /// `league`, or `None` when:
     /// - `item.item_class` is absent,
-    /// - the category has no model for this league,
-    /// - the category is under-sampled (`sample_size < TRUST_MIN_SAMPLE`), or
-    /// - the LOO back-test error exceeds `TRUST_MAX_ERROR`.
+    /// - the category has no model for this league, or
+    /// - the category is not trusted (`sample_size < TRUST_MIN_SAMPLE`, or no positive skill over the category-median baseline).
     ///
     /// The method is intentionally synchronous — it only reads the in-memory
     /// model; no I/O is performed.
@@ -177,13 +176,8 @@ impl<C: Comparables> TradePricer<C> {
         // 3. Category lookup.
         let cat = model.category(league, &canon)?;
 
-        // 4. Trust bar.
-        let trusted = cat.sample_size >= crate::trade::value::TRUST_MIN_SAMPLE
-            && cat
-                .loo_error
-                .map(|e| e <= crate::trade::value::TRUST_MAX_ERROR)
-                .unwrap_or(false);
-        if !trusted {
+        // 4. Trust bar: enough samples AND positive skill over the no-feature baseline.
+        if !cat.is_trusted() {
             return None;
         }
 
@@ -817,32 +811,46 @@ mod tests {
     // learned_estimate helpers and tests
     // ──────────────────────────────────────────────────────────────────────────
 
-    /// Build a `ValueModel` with ≥`TRUST_MIN_SAMPLE` uniform observations for
-    /// the "Staff" category (item class "Staves") in league "Standard".  All
-    /// items are priced at `price_divine` and carry `stat_id`.  With a
-    /// homogeneous corpus, LOO error = 0 (each item predicts its neighbours
-    /// exactly) which satisfies `<= TRUST_MAX_ERROR`.
+    /// Build a `ValueModel` with ≥`TRUST_MIN_SAMPLE` observations for the "Staff"
+    /// category (item class "Staves") in league "Standard". Items carry `stat_id`
+    /// with a roll that varies linearly from 0 to 1 across the corpus, and price
+    /// is set to `price_divine * (1 + roll)` so it tracks the roll. Each item
+    /// also carries a unique tag mod so every mod-set is distinct (self-exclusion
+    /// removes only the probe itself, not a whole group). The roll-price correlation
+    /// gives the k-NN genuine signal to beat the category-median baseline, producing
+    /// skill > 0 and making `is_trusted()` return true.
     fn trusted_staff_model(stat_id: &str, price_divine: f64) -> crate::trade::value::ValueModel {
         use crate::observe::{Observation, Source};
         use crate::trade::model::ListingMod;
         use crate::trade::value::TRUST_MIN_SAMPLE;
 
         let n = TRUST_MIN_SAMPLE + 10; // 90 observations
-        let obs: Vec<Observation> = (0..n as u64)
-            .map(|i| Observation {
-                timestamp_unix: i,
-                league: "Standard".into(),
-                base_type: Some("Chiming Staff".into()),
-                // "Staves" is the clipboard plural → canonical_category gives "Staff"
-                category: Some("Staves".into()),
-                mods: vec![ListingMod {
-                    stat_id: stat_id.into(),
-                    tier: None,
-                    roll: None,
-                }],
-                price_divine,
-                source: Source::Harvest,
-                indexed: None,
+        let obs: Vec<Observation> = (0..n)
+            .map(|i| {
+                let roll = i as f64 / (n - 1) as f64; // 0.0 .. 1.0
+                Observation {
+                    timestamp_unix: i as u64,
+                    league: "Standard".into(),
+                    base_type: Some("Chiming Staff".into()),
+                    // "Staves" is the clipboard plural → canonical_category gives "Staff"
+                    category: Some("Staves".into()),
+                    mods: vec![
+                        ListingMod {
+                            stat_id: stat_id.into(),
+                            tier: None,
+                            roll: Some(roll * 100.0), // roll 0..100
+                        },
+                        // unique tag mod per item so self-exclusion removes only this item
+                        ListingMod {
+                            stat_id: format!("explicit.tag{i}"),
+                            tier: None,
+                            roll: None,
+                        },
+                    ],
+                    price_divine: price_divine * (1.0 + roll), // price tracks roll
+                    source: Source::Harvest,
+                    indexed: None,
+                }
             })
             .collect();
         crate::trade::value::ValueModel::build(&obs, &crate::trade::stats::StatCatalog::default())
@@ -969,18 +977,19 @@ mod tests {
     }
 
     #[test]
-    fn learned_estimate_high_loo_error_returns_none() {
+    fn learned_estimate_zero_skill_returns_none() {
         // Exercises the RIGHT-HAND branch of the trust bar: a category that CLEARS
-        // the sample-size gate (sample_size >= TRUST_MIN_SAMPLE) but whose LOO
-        // back-test error exceeds TRUST_MAX_ERROR must still return None. Without
-        // this, a model that fits poorly out-of-sample could be trusted.
+        // the sample-size gate (sample_size >= TRUST_MIN_SAMPLE) but whose calibration
+        // shows no positive skill over the category-median baseline must return None.
+        // Without this, a model that fits no better than guessing the median could be trusted.
         use crate::trade::stats::StatCatalog;
+        use crate::trade::value::backtest::Calibration;
         use crate::trade::value::estimate::SimWeights;
         use crate::trade::value::itemvec::ItemVector;
-        use crate::trade::value::{CategoryModel, TRUST_MAX_ERROR, TRUST_MIN_SAMPLE};
+        use crate::trade::value::{CategoryModel, TRUST_MIN_SAMPLE};
 
         // Plenty of neighbours sharing the query stat, so estimate() WOULD succeed
-        // if the trust check were bypassed — proving None comes from loo_error, not
+        // if the trust check were bypassed — proving None comes from zero skill, not
         // a missing-neighbour shortfall.
         let items: Vec<ItemVector> = (0..20)
             .map(|i| ItemVector {
@@ -997,7 +1006,12 @@ mod tests {
                 jaccard: 1.0,
                 roll: 0.0,
             },
-            loo_error: Some(TRUST_MAX_ERROR + 0.01), // 0.51 > 0.50 → above the bar
+            // skill = 0.0 → not trusted (no positive skill over baseline)
+            calibration: Calibration {
+                model_err: Some(0.7),
+                baseline_err: Some(0.7),
+                skill: Some(0.0),
+            },
             ..Default::default()
         };
         let model = crate::trade::value::ValueModel::with_category("Standard", cat);
@@ -1015,8 +1029,7 @@ mod tests {
         let est = pricer.learned_estimate(&item, "Standard");
         assert!(
             est.is_none(),
-            "loo_error {:?} > TRUST_MAX_ERROR ({TRUST_MAX_ERROR}) must return None",
-            TRUST_MAX_ERROR + 0.01
+            "zero-skill calibration must return None (model no better than median baseline)"
         );
     }
 

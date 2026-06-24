@@ -56,7 +56,7 @@ fn predict_one(items: &[ItemVector], keys: &[String], skip: usize, w: SimWeights
     let mut scored: Vec<(f64, f64)> = items
         .iter()
         .enumerate()
-        .filter(|(i, _)| *i != skip && keys[*i] != keys[skip])
+        .filter(|(i, _)| keys[*i] != keys[skip])
         .map(|(_, it)| (similarity(&q, it, w), it.price_divine))
         .filter(|(s, _)| *s > 0.0)
         .collect();
@@ -160,14 +160,6 @@ pub fn tune_and_calibrate(items: &[ItemVector]) -> (SimWeights, Calibration) {
             skill,
         },
     )
-}
-
-/// Compatibility shim kept for the `value/mod.rs` caller that Task 2 will migrate.
-/// Delegates to `tune_and_calibrate` and returns `(weights, model_err)`.
-/// Remove this once `CategoryModel` carries a `Calibration` field (Task 2).
-pub fn tune_weights(items: &[ItemVector]) -> (SimWeights, Option<f64>) {
-    let (w, cal) = tune_and_calibrate(items);
-    (w, cal.model_err)
 }
 
 #[cfg(test)]

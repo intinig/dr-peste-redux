@@ -32,8 +32,6 @@ pub const K_NEIGHBORS: usize = 15;
 pub const MIN_NEIGHBORS: usize = 5;
 /// Minimum `sample_size` for a `CategoryModel` to be trusted by `learned_estimate`.
 pub const TRUST_MIN_SAMPLE: usize = 80;
-/// Maximum `loo_error` for a `CategoryModel` to be trusted by `learned_estimate`.
-pub const TRUST_MAX_ERROR: f64 = 0.50;
 /// Relative divergence threshold between the learned corpus estimate and the
 /// live trade price above which the embed flags a warning.
 pub const DIVERGENCE_FLAG: f64 = 0.50;
@@ -119,7 +117,7 @@ pub struct CategoryModel {
     pub items: Vec<itemvec::ItemVector>,
     pub weights: estimate::SimWeights,
     pub undersampled_gates: Vec<gates::GateCandidate>,
-    pub loo_error: Option<f64>,
+    pub calibration: backtest::Calibration,
 }
 
 impl CategoryModel {
@@ -128,6 +126,13 @@ impl CategoryModel {
         self.stats
             .iter()
             .filter(|s| s.count >= MIN_STAT_SAMPLE && s.lift >= DRIVER_LIFT)
+    }
+
+    /// A category's learned layer is trusted iff it has enough samples AND demonstrates
+    /// positive skill over the no-feature (category-median) baseline. Replaces the old
+    /// `loo_error <= 0.50` gate (which scored leaky, individual-listing error).
+    pub fn is_trusted(&self) -> bool {
+        self.sample_size >= TRUST_MIN_SAMPLE && self.calibration.skill.is_some_and(|s| s > 0.0)
     }
 }
 
@@ -336,7 +341,7 @@ fn build_category(
 
     let mod_rolls = magnitude::build_mod_rolls(obs);
     let items = itemvec::build_item_vectors(obs, &mod_rolls);
-    let (weights, loo_error) = backtest::tune_weights(&items);
+    let (weights, calibration) = backtest::tune_and_calibrate(&items);
     let undersampled_gates = gates::detect_gates(&stats);
 
     CategoryModel {
@@ -349,7 +354,7 @@ fn build_category(
         items,
         weights,
         undersampled_gates,
-        loo_error,
+        calibration,
     }
 }
 
@@ -721,5 +726,35 @@ mod tests {
         // Deconfounded ranking puts A ahead of B.
         let pos = |id: &str| cat.stats.iter().position(|s| s.stat_id == id).unwrap();
         assert!(pos("A") < pos("B"));
+    }
+
+    #[test]
+    fn is_trusted_requires_sample_and_positive_skill() {
+        let mk = |n: usize, skill: Option<f64>| CategoryModel {
+            sample_size: n,
+            calibration: backtest::Calibration {
+                model_err: Some(0.7),
+                baseline_err: Some(0.8),
+                skill,
+            },
+            ..Default::default()
+        };
+        assert!(
+            mk(100, Some(0.15)).is_trusted(),
+            "enough samples + positive skill"
+        );
+        assert!(
+            !mk(100, Some(0.0)).is_trusted(),
+            "zero skill is not trusted"
+        );
+        assert!(
+            !mk(100, Some(-0.2)).is_trusted(),
+            "negative skill is not trusted"
+        );
+        assert!(
+            !mk(10, Some(0.5)).is_trusted(),
+            "under-sampled is not trusted"
+        );
+        assert!(!mk(100, None).is_trusted(), "no calibration is not trusted");
     }
 }
