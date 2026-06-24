@@ -13,6 +13,19 @@ const WEIGHT_GRID: [(f64, f64); 5] = [
     (0.0, 1.0),
 ];
 
+/// Cap on leave-one-out held-out probes per category. The neighbour search still
+/// scans ALL items, but evaluating error on a strided subset keeps calibration at
+/// O(grid × probes × n) instead of O(grid × n²) — bounding rebuild cost (notably the
+/// synchronous startup rebuild) as the corpus grows. Categories with ≤ this many
+/// items probe every item, so small-category behaviour is unchanged.
+const LOO_MAX_PROBES: usize = 400;
+
+/// Stride between held-out probes so they span the corpus evenly: 1 when
+/// `n <= LOO_MAX_PROBES` (probe all), else `ceil(n / LOO_MAX_PROBES)`.
+fn loo_probe_step(n: usize) -> usize {
+    n.div_ceil(LOO_MAX_PROBES).max(1)
+}
+
 fn predict_one(items: &[ItemVector], skip: usize, w: SimWeights) -> Option<f64> {
     let q: Vec<(String, Option<f64>)> = items[skip].mods.clone();
     let mut scored: Vec<(f64, f64)> = items
@@ -31,15 +44,19 @@ fn predict_one(items: &[ItemVector], skip: usize, w: SimWeights) -> Option<f64> 
 }
 
 pub fn loo_median_error(items: &[ItemVector], w: SimWeights) -> Option<f64> {
+    // Probe a strided subset of held-out items (every `step`-th, spanning the corpus);
+    // each prediction still searches all other items for neighbours. Bounds cost.
+    let step = loo_probe_step(items.len());
     let mut errs: Vec<f64> = Vec::new();
-    for i in 0..items.len() {
+    let mut i = 0;
+    while i < items.len() {
         let actual = items[i].price_divine;
-        if actual <= 0.0 {
-            continue;
+        if actual > 0.0 {
+            if let Some(pred) = predict_one(items, i, w) {
+                errs.push((pred - actual).abs() / actual);
+            }
         }
-        if let Some(pred) = predict_one(items, i, w) {
-            errs.push((pred - actual).abs() / actual);
-        }
+        i += step;
     }
     if errs.len() < MIN_NEIGHBORS {
         return None;
@@ -128,6 +145,29 @@ mod tests {
             w.jaccard >= w.roll,
             "combination-dominant → jaccard not beaten (w={:?})",
             w
+        );
+    }
+
+    #[test]
+    fn loo_probe_step_caps_probes_for_large_corpora() {
+        assert_eq!(loo_probe_step(40), 1, "small corpus probes every item");
+        assert_eq!(
+            loo_probe_step(LOO_MAX_PROBES),
+            1,
+            "at the cap, still probe all"
+        );
+        assert_eq!(
+            loo_probe_step(LOO_MAX_PROBES + 1),
+            2,
+            "just over the cap → stride 2"
+        );
+        assert_eq!(loo_probe_step(1768), 5, "ceil(1768/400) = 5");
+        // Strided probe count stays bounded ~LOO_MAX_PROBES regardless of corpus size.
+        let n = 5000usize;
+        let probes = n.div_ceil(loo_probe_step(n));
+        assert!(
+            probes <= LOO_MAX_PROBES + 1,
+            "probe count bounded, got {probes}"
         );
     }
 }
