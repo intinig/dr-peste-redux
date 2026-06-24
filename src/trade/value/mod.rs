@@ -31,6 +31,10 @@ pub const ROLL_QUANTILES: usize = 21;
 pub const K_NEIGHBORS: usize = 15;
 /// Minimum neighbours required to emit a `ValueEstimate` (otherwise `None`).
 pub const MIN_NEIGHBORS: usize = 5;
+/// Minimum `sample_size` for a `CategoryModel` to be trusted by `learned_estimate`.
+pub const TRUST_MIN_SAMPLE: usize = 80;
+/// Maximum `loo_error` for a `CategoryModel` to be trusted by `learned_estimate`.
+pub const TRUST_MAX_ERROR: f64 = 0.50;
 
 pub mod backtest;
 pub mod estimate;
@@ -168,6 +172,20 @@ impl ValueModel {
             }
             leagues.insert(league, categories);
         }
+        ValueModel { leagues }
+    }
+
+    /// Test-only: build a model holding a single pre-constructed `CategoryModel`,
+    /// keyed by `(league, canonical_category(category))`. Lets tests exercise the
+    /// trust bar directly (e.g. a category that clears the sample-size gate but
+    /// carries a high `loo_error`) without round-tripping a synthetic corpus.
+    #[cfg(test)]
+    pub(crate) fn with_category(league: &str, cat: CategoryModel) -> ValueModel {
+        let canon = canonical_category(&cat.category);
+        let mut categories = HashMap::new();
+        categories.insert(canon, cat);
+        let mut leagues = HashMap::new();
+        leagues.insert(league.to_string(), categories);
         ValueModel { leagues }
     }
 }
