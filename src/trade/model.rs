@@ -255,11 +255,14 @@ mod tests {
             .is_sub_priceable(),
             "exactly 1 div → priceable"
         );
-        assert!(!PriceEstimate {
-            typical: 5.0,
-            ..base.clone()
-        }
-        .is_sub_priceable());
+        assert!(
+            !PriceEstimate {
+                typical: 5.0,
+                ..base.clone()
+            }
+            .is_sub_priceable(),
+            "above floor → not sub-priceable"
+        );
         assert!(
             !PriceEstimate {
                 listing_count: 0,

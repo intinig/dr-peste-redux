@@ -19,6 +19,14 @@ pub fn is_priceable(price_divine: f64) -> bool {
     (MIN_PRICEABLE_DIVINE..ABSURD_DIVINE_CAP).contains(&price_divine)
 }
 
+/// Capture-time ceiling check: drop only absurd troll prices. Unlike `is_priceable`,
+/// this imposes NO 1-div floor — sub-1-div listings must reach the live `/paste`
+/// pricer so it can detect and report a genuinely cheap item. The 1-div floor is a
+/// corpus-learning concern only, applied in `value::rebuild_into` via `is_priceable`.
+pub fn is_below_absurd_cap(price_divine: f64) -> bool {
+    price_divine < ABSURD_DIVINE_CAP
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -43,5 +51,25 @@ mod tests {
         for p in [1.0, 5.0, 30.0, 300.0, 1200.0] {
             assert!(is_priceable(p), "{p} div should be priceable");
         }
+    }
+
+    #[test]
+    fn below_absurd_cap_allows_sub_one_div() {
+        assert!(
+            is_below_absurd_cap(0.5),
+            "sub-1-div listing must pass the capture ceiling check"
+        );
+        assert!(
+            is_below_absurd_cap(30.0),
+            "in-band price must pass the capture ceiling check"
+        );
+        assert!(
+            !is_below_absurd_cap(ABSURD_DIVINE_CAP),
+            "at the cap boundary should be dropped"
+        );
+        assert!(
+            !is_below_absurd_cap(1_111_111.0),
+            "far above the cap should be dropped"
+        );
     }
 }
