@@ -74,11 +74,11 @@ pub fn gate_section(
     }
     let mut out = String::from("\n**Undersampled gates** (need more data):\n");
     for g in gates.iter().take(8) {
-        // Always show the raw stat_id (in backticks) — it's the value the operator
-        // pastes into `/harvest mod:` (gate-driven autocomplete not yet wired), with
-        // the human label alongside it when known.
+        // Show the human label; fall back to the raw stat_id (in backticks) only when
+        // it can't be resolved. The operator selects the gate from `/harvest mod:`
+        // autocomplete, so the raw id no longer needs to be shown for manual copy.
         match g.label.as_deref().or_else(|| catalog.label_for(&g.stat_id)) {
-            Some(lbl) => out.push_str(&format!("• {} — `{}` (n={})\n", lbl, g.stat_id, g.count)),
+            Some(lbl) => out.push_str(&format!("• {} (n={})\n", lbl, g.count)),
             None => out.push_str(&format!("• `{}` (n={})\n", g.stat_id, g.count)),
         }
     }
@@ -116,15 +116,16 @@ mod tests {
             "label missing: {section}"
         );
         assert!(section.contains("n=3"), "count missing: {section}");
-        // Falls back to stat_id when label is None
+        // Falls back to the raw stat_id only when the label is unknown.
         assert!(
             section.contains("explicit.stat_5678"),
             "fallback id missing: {section}"
         );
-        // Labeled gate must ALSO expose its raw stat_id (copyable for /harvest mod:)
+        // A labeled gate shows ONLY its label — the raw stat_id is not printed
+        // (the operator picks it from `/harvest mod:` autocomplete).
         assert!(
-            section.contains("explicit.stat_1234"),
-            "labeled gate must still show its copyable stat_id: {section}"
+            !section.contains("explicit.stat_1234"),
+            "labeled gate must not print its raw stat_id: {section}"
         );
     }
 
