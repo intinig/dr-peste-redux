@@ -113,8 +113,11 @@ pub struct CategoryModel {
     /// Stats in deconfounded rank order (drivers first).
     pub stats: Vec<StatValue>,
     pub cooccurrences: Vec<ModPair>,
+    #[allow(dead_code)] // Phase 1: used by CategoryModel::estimate (learned k-NN path).
     pub mod_rolls: HashMap<String, magnitude::RollStats>,
+    #[allow(dead_code)] // Phase 1: used by CategoryModel::estimate (learned k-NN path).
     pub items: Vec<itemvec::ItemVector>,
+    #[allow(dead_code)] // Phase 1: used by CategoryModel::estimate (learned k-NN path).
     pub weights: estimate::SimWeights,
     pub undersampled_gates: Vec<gates::GateCandidate>,
     pub calibration: backtest::Calibration,

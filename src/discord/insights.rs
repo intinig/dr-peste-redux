@@ -9,7 +9,7 @@ use poise::serenity_prelude as serenity;
 
 /// One calibration line per category, e.g.
 /// `Staff: n=2087 · model 75% · base 88% · skill +15% ✓ (beats baseline)`
-/// or `Amulet: n=1206 · model 75% · base 76% · skill −1% ✗ (no skill over baseline)`.
+/// or `Amulet: n=1206 · model 75% · base 76% · skill -1% ✗ (no skill over baseline)`.
 /// Metrics show `n/a` when absent.
 pub fn calibration_line(cat: &CategoryModel) -> String {
     let pct = |x: Option<f64>| match x {

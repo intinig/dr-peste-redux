@@ -148,7 +148,9 @@ async fn run_pricing(
             .and_then(|r| r.to_divine(1.0, &code))
     };
 
-    let learned = pricer.learned_estimate(parsed, &league.name);
+    // Phase 0: corpus/learned pricing is not surfaced on /paste — Phase 1 replaces the
+    // point estimate with calibrated ranges + abstention.
+    // /insights still reports per-category skill via is_trusted().
 
     let button = serenity::CreateButton::new("drp_breakdown")
         .label("Break it down")
@@ -165,7 +167,7 @@ async fn run_pricing(
                     &est,
                     league,
                     secondary_rate,
-                    learned.as_ref(),
+                    None,
                 ))
                 .components(vec![row]),
         )
@@ -211,7 +213,7 @@ async fn run_pricing(
                             &est,
                             league,
                             secondary_rate,
-                            learned.as_ref(),
+                            None,
                         ))
                         .components(vec![]),
                 )
@@ -227,7 +229,7 @@ async fn run_pricing(
                             &est,
                             league,
                             secondary_rate,
-                            learned.as_ref(),
+                            None,
                         ))
                         .components(vec![]),
                 )

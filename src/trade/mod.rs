@@ -162,6 +162,11 @@ impl<C: Comparables> TradePricer<C> {
     ///
     /// The method is intentionally synchronous — it only reads the in-memory
     /// model; no I/O is performed.
+    ///
+    /// **Phase 0 note:** this method is NOT wired to `/paste` output in Phase 0.
+    /// Phase 1 will replace the point estimate with calibrated ranges + abstention
+    /// before surfacing it to users.
+    #[allow(dead_code)] // Retained for Phase 1 (calibrated-range surfacing); not wired to /paste in Phase 0.
     pub fn learned_estimate(
         &self,
         item: &ParsedItem,

@@ -62,6 +62,7 @@ pub fn similarity(query: &[(String, Option<f64>)], item: &ItemVector, w: SimWeig
     w.jaccard * jac + w.roll * roll
 }
 
+#[allow(dead_code)] // Phase 1: returned by CategoryModel::estimate; not surfaced in Phase 0.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Confidence {
     High,
@@ -95,6 +96,7 @@ pub(crate) fn weighted_median(scored: &[(f64, f64)]) -> f64 {
     v.last().map(|(_, p)| *p).unwrap_or(0.0)
 }
 
+#[allow(dead_code)] // Phase 1: used by CategoryModel::estimate; not called in Phase 0.
 fn relative_spread(prices: &[f64], center: f64) -> f64 {
     if center <= 0.0 || prices.is_empty() {
         return f64::INFINITY;
@@ -105,6 +107,7 @@ fn relative_spread(prices: &[f64], center: f64) -> f64 {
 }
 
 impl crate::trade::value::CategoryModel {
+    #[allow(dead_code)] // Phase 1: called by TradePricer::learned_estimate; not wired to /paste in Phase 0.
     pub fn query_from_stats(&self, stats: &[(String, Option<f64>)]) -> Vec<(String, Option<f64>)> {
         stats
             .iter()
@@ -115,6 +118,7 @@ impl crate::trade::value::CategoryModel {
             .collect()
     }
 
+    #[allow(dead_code)] // Phase 1: called by TradePricer::learned_estimate; not wired to /paste in Phase 0.
     pub fn estimate(&self, query: &[(String, Option<f64>)]) -> Option<ValueEstimate> {
         if self.items.is_empty() {
             return None;
