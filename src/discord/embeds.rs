@@ -241,6 +241,13 @@ pub fn estimate_embed(
     )))
 }
 
+/// Message shown on `/paste` when an item prices under 1 divine: report it's cheap
+/// rather than estimating a precise sub-1-div value. Takes the item name (not the
+/// whole `ParsedItem`) so it is trivially testable.
+pub fn sub_one_div_message(item_name: &str) -> String {
+    format!("💸 **{item_name}** — worth under 1 divine. Not worth pricing precisely.")
+}
+
 pub fn breakdown_embed(
     parsed: &ParsedItem,
     bd: &Breakdown,
@@ -491,5 +498,12 @@ mod tests {
             !json.contains("Learned (corpus)"),
             "unexpected field: {json}"
         );
+    }
+
+    #[test]
+    fn sub_one_div_message_names_the_item_and_says_under_one_div() {
+        let m = super::sub_one_div_message("Chiming Staff");
+        assert!(m.contains("Chiming Staff"));
+        assert!(m.contains("under 1 divine"));
     }
 }
