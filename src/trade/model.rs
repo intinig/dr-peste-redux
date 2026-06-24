@@ -162,12 +162,19 @@ pub struct PriceEstimate {
 }
 
 impl PriceEstimate {
-    /// True when we have live listings but the representative (typical/p50) value is
-    /// below the priceable floor — too cheap to bother estimating precisely.
-    /// `listing_count == 0` (no comparable data) is NOT sub-priceable: absence of
-    /// comps is not evidence of cheapness.
+    /// True when we have the item's genuine exact comparables (`CraftTier`) and their
+    /// representative (typical/p50) value is below the priceable floor — too cheap to
+    /// bother estimating precisely.
+    ///
+    /// Gated on `CraftTier` deliberately: when the exact constraint matches nothing,
+    /// `price_check` relaxes to a broad-market sample (`BroadMarket`), whose median is
+    /// NOT evidence the pasted item itself is cheap — a rare item with no exact live
+    /// comps must not be mislabeled "under 1 divine". `listing_count == 0` (no data)
+    /// is likewise not sub-priceable: absence of comps is not evidence of cheapness.
     pub fn is_sub_priceable(&self) -> bool {
-        self.listing_count > 0 && self.typical < crate::trade::quality::MIN_PRICEABLE_DIVINE
+        self.listing_count > 0
+            && matches!(self.basis, EstimateBasis::CraftTier)
+            && self.typical < crate::trade::quality::MIN_PRICEABLE_DIVINE
     }
 }
 
@@ -270,6 +277,22 @@ mod tests {
             }
             .is_sub_priceable(),
             "no listings is unknown, not cheap"
+        );
+        assert!(
+            !PriceEstimate {
+                basis: EstimateBasis::BroadMarket,
+                ..base.clone()
+            }
+            .is_sub_priceable(),
+            "relaxed broad-market fallback (no exact comps) is not evidence the item is cheap"
+        );
+        assert!(
+            !PriceEstimate {
+                basis: EstimateBasis::AffixesOnly,
+                ..base.clone()
+            }
+            .is_sub_priceable(),
+            "non-CraftTier basis does not short-circuit"
         );
     }
 }

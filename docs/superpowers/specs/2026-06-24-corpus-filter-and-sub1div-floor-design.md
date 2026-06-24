@@ -5,11 +5,11 @@ noise, not by tuning thresholds. A category clears the trust bar
 (`sample_size ≥ 80 && loo_error ≤ 0.50`) only when its data genuinely supports a
 prediction within 50% — never by relaxing the bar.
 
-**Architecture (one sentence):** A single shared price-quality predicate
-(`is_priceable`) drops time-invariant junk at capture *and* retroactively at
-consumption, the value-model rebuild learns only from timestamped fresh rows, and
-`/paste` short-circuits sub-1-div items to a "not worth pricing" line instead of an
-estimate.
+**Architecture (one sentence):** Capture (`parse_fetch`) drops only absurd troll
+prices (`is_below_absurd_cap`), keeping sub-1-div listings; the value-model rebuild
+learns only from priceable (`is_priceable`), timestamped, fresh rows — so the 1-div
+floor is a consumption-only concern; and `/paste` short-circuits an item to a "not
+worth pricing" line when its exact comparables' median is under 1 div.
 
 **Tech stack:** Rust (no new deps). Touches `src/trade/client.rs` (capture),
 a new `src/trade/quality.rs` (predicate), `src/trade/value/mod.rs` (consumption),
@@ -136,19 +136,20 @@ they still show their real number.
 
 ## Data flow (unchanged in spirit)
 
-trade2 fetch → `parse_fetch` (now also drops `!is_priceable`) → Listings → (a) live
-ablation `/paste`, (b) `Observation` corpus JSONL → `rebuild_into` (now drops
-`!is_priceable` + undated) → `ValueModel`. The on-disk corpus still records every
-captured-and-priceable row with its age; only *use* is filtered.
+trade2 fetch → `parse_fetch` (now also drops `!is_below_absurd_cap` — absurd trolls
+only; sub-1-div listings are kept) → Listings → (a) live ablation `/paste`, (b)
+`Observation` corpus JSONL → `rebuild_into` (drops `!is_priceable` — the 1-div floor —
++ undated) → `ValueModel`. The on-disk corpus records every captured row (incl.
+sub-1-div) with its age; the 1-div floor is applied only at learning.
 
 ## Testing
 
 - `quality::is_priceable`: boundaries — `1.0` priceable, `0.999` dropped, `0.0`/dust
   dropped, just-below `ABSURD_DIVINE_CAP` priceable, `ABSURD_DIVINE_CAP` and above
   dropped.
-- `parse_fetch`: a fixture with a dust row, an absurd-troll row (mirror rate absent),
-  and an in-band row → only the in-band row survives (existing mirror/veiled cases
-  still pass).
+- `parse_fetch`: a fixture with two sub-1-div rows, an absurd-troll row (mirror rate
+  absent), and an in-band row → the sub-1-div and in-band rows are **kept**, only the
+  absurd troll is dropped (existing mirror/veiled cases still pass).
 - `rebuild_into`: a mixed fixture (dust + undated-but-otherwise-valid + clean fresh
   in-band) → resulting `CategoryModel.sample_size` counts only the clean fresh
   in-band rows; undated and sub-1-div are excluded.

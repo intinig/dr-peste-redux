@@ -2,7 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make value-model categories trustable by removing corpus noise — a shared `is_priceable` price-band predicate drops sub-1-div + absurd-troll rows at capture and retroactively at consumption, the rebuild learns only from timestamped fresh rows, and `/paste` reports sub-1-div items as "under 1 divine" instead of estimating.
+**Goal:** Make value-model categories trustable by removing corpus noise. Capture (`parse_fetch`) drops only absurd troll prices (`is_below_absurd_cap`) and **keeps sub-1-div listings**; the rebuild learns only from priceable (`is_priceable`), timestamped, fresh rows (the 1-div floor is consumption-only); and `/paste` reports an item as "under 1 divine" when its exact comparables' median is sub-1-div.
+
+> **Correction (post-implementation):** Task 2 below was originally written to drop `!is_priceable` (sub-1-div + absurd) at capture. Whole-branch review found that made the `/paste` short-circuit unreachable (the live median could never fall below 1 div), so the shipped code drops only `is_below_absurd_cap` at capture and applies the 1-div floor at consumption (Task 3). Read Task 2's capture snippets with that correction in mind; the spec reflects the final design.
 
 **Architecture:** One new pure module (`src/trade/quality.rs`) holds the predicate and the two constants. The capture path (`client::parse_fetch`) and the value-model rebuild (`value::rebuild_into`) both call it; the rebuild additionally requires a present+parseable+fresh timestamp. `/paste` branches on a new `PriceEstimate::is_sub_priceable()` before rendering.
 
