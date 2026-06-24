@@ -25,6 +25,9 @@ const TOP_COOCCURRENCE: usize = 8;
 #[allow(dead_code)]
 pub const ROLL_QUANTILES: usize = 21;
 
+pub mod estimate;
+pub mod gates;
+pub mod itemvec;
 pub mod magnitude;
 
 /// Per-stat value signal within a category.
@@ -98,6 +101,14 @@ pub struct CategoryModel {
     /// Stats in deconfounded rank order (drivers first).
     pub stats: Vec<StatValue>,
     pub cooccurrences: Vec<ModPair>,
+    #[allow(dead_code)]
+    pub mod_rolls: HashMap<String, magnitude::RollStats>,
+    #[allow(dead_code)]
+    pub items: Vec<itemvec::ItemVector>,
+    #[allow(dead_code)]
+    pub weights: estimate::SimWeights,
+    #[allow(dead_code)]
+    pub undersampled_gates: Vec<gates::GateCandidate>,
 }
 
 impl CategoryModel {
@@ -279,12 +290,19 @@ fn build_category(category: String, obs: &[&Observation]) -> CategoryModel {
     // Deconfounded ranking fills conditional_lift + final order.
     rank_deconfounded(&mut stats, obs);
 
+    let mod_rolls = magnitude::build_mod_rolls(obs);
+    let items = itemvec::build_item_vectors(obs, &mod_rolls);
+
     CategoryModel {
         category,
         sample_size,
         base_median,
         stats,
         cooccurrences,
+        mod_rolls,
+        items,
+        weights: estimate::SimWeights::default(),
+        undersampled_gates: Vec::new(),
     }
 }
 
