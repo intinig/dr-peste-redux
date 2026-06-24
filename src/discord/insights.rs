@@ -3,9 +3,33 @@
 //! everyone (non-secret market data).
 
 use super::{Context, Error};
-use crate::trade::value::{canonical_category, MIN_CATEGORY_SAMPLE};
+use crate::trade::value::{
+    canonical_category, CategoryModel, MIN_CATEGORY_SAMPLE, TRUST_MAX_ERROR, TRUST_MIN_SAMPLE,
+};
 use futures::Stream;
 use poise::serenity_prelude as serenity;
+
+/// Returns a single calibration line for a category:
+/// `Staff: n=1141, LOO err 31%, weights j/r 0.50/0.50 ✓trusted`
+/// or `Wand: n=42, LOO err 64%, weights j/r 0.75/0.25 ✗untrusted`.
+/// LOO err shows `n/a` when `loo_error` is `None`.
+pub fn calibration_line(cat: &CategoryModel) -> String {
+    let loo = match cat.loo_error {
+        Some(e) => format!("{:.0}%", e * 100.0),
+        None => "n/a".to_string(),
+    };
+    let trusted =
+        cat.sample_size >= TRUST_MIN_SAMPLE && cat.loo_error.is_some_and(|e| e <= TRUST_MAX_ERROR);
+    let trust_mark = if trusted {
+        "✓trusted"
+    } else {
+        "✗untrusted"
+    };
+    format!(
+        "{}: n={}, LOO err {}, weights j/r {:.2}/{:.2} {}",
+        cat.category, cat.sample_size, loo, cat.weights.jaccard, cat.weights.roll, trust_mark,
+    )
+}
 
 /// The active league name from the store snapshot, if the bot has warmed up.
 async fn current_league(ctx: &Context<'_>) -> Option<String> {
@@ -37,6 +61,125 @@ pub async fn autocomplete_insights_category<'a>(
         None => Vec::new(),
     };
     futures::stream::iter(names)
+}
+
+/// Formats the undersampled-gate section for a category's insights body.
+/// Returns an empty string when there are no gate candidates.
+pub fn gate_section(
+    gates: &[crate::trade::value::gates::GateCandidate],
+    catalog: &crate::trade::stats::StatCatalog,
+) -> String {
+    if gates.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("\n**Undersampled gates** (need more data):\n");
+    for g in gates.iter().take(8) {
+        // Always show the raw stat_id (in backticks) — it's the value the operator
+        // pastes into `/harvest mod:` (gate-driven autocomplete not yet wired), with
+        // the human label alongside it when known.
+        match g.label.as_deref().or_else(|| catalog.label_for(&g.stat_id)) {
+            Some(lbl) => out.push_str(&format!("• {} — `{}` (n={})\n", lbl, g.stat_id, g.count)),
+            None => out.push_str(&format!("• `{}` (n={})\n", g.stat_id, g.count)),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::trade::stats::StatCatalog;
+    use crate::trade::value::gates::GateCandidate;
+
+    fn gate(stat_id: &str, label: Option<&str>, count: usize) -> GateCandidate {
+        GateCandidate {
+            stat_id: stat_id.into(),
+            label: label.map(str::to_owned),
+            count,
+        }
+    }
+
+    #[test]
+    fn gate_section_non_empty_when_gates_present() {
+        let catalog = StatCatalog::default();
+        let gates = vec![
+            gate("explicit.stat_1234", Some("increased Fire Damage"), 3),
+            gate("explicit.stat_5678", None, 7),
+        ];
+        let section = gate_section(&gates, &catalog);
+        assert!(
+            section.contains("Undersampled gates"),
+            "section header missing: {section}"
+        );
+        assert!(
+            section.contains("increased Fire Damage"),
+            "label missing: {section}"
+        );
+        assert!(section.contains("n=3"), "count missing: {section}");
+        // Falls back to stat_id when label is None
+        assert!(
+            section.contains("explicit.stat_5678"),
+            "fallback id missing: {section}"
+        );
+        // Labeled gate must ALSO expose its raw stat_id (copyable for /harvest mod:)
+        assert!(
+            section.contains("explicit.stat_1234"),
+            "labeled gate must still show its copyable stat_id: {section}"
+        );
+    }
+
+    #[test]
+    fn gate_section_empty_when_no_gates() {
+        let catalog = StatCatalog::default();
+        assert_eq!(gate_section(&[], &catalog), "");
+    }
+
+    fn make_cat(
+        name: &str,
+        sample_size: usize,
+        loo_error: Option<f64>,
+        jaccard: f64,
+        roll: f64,
+    ) -> crate::trade::value::CategoryModel {
+        use crate::trade::value::estimate::SimWeights;
+        crate::trade::value::CategoryModel {
+            category: name.to_owned(),
+            sample_size,
+            loo_error,
+            weights: SimWeights { jaccard, roll },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn calibration_line_trusted() {
+        let cat = make_cat("Staff", 1141, Some(0.31), 0.50, 0.50);
+        let line = calibration_line(&cat);
+        assert!(line.contains("Staff:"), "category name: {line}");
+        assert!(line.contains("n=1141"), "sample_size: {line}");
+        assert!(line.contains("LOO err 31%"), "loo pct: {line}");
+        assert!(line.contains("j/r 0.50/0.50"), "weights: {line}");
+        assert!(line.contains("✓trusted"), "trust mark: {line}");
+    }
+
+    #[test]
+    fn calibration_line_untrusted_high_error() {
+        let cat = make_cat("Wand", 42, Some(0.64), 0.75, 0.25);
+        let line = calibration_line(&cat);
+        assert!(line.contains("Wand:"), "category name: {line}");
+        assert!(line.contains("n=42"), "sample_size: {line}");
+        assert!(line.contains("LOO err 64%"), "loo pct: {line}");
+        assert!(line.contains("j/r 0.75/0.25"), "weights: {line}");
+        assert!(line.contains("✗untrusted"), "trust mark: {line}");
+    }
+
+    #[test]
+    fn calibration_line_no_loo_error() {
+        let cat = make_cat("Bow", 5, None, 1.0, 0.0);
+        let line = calibration_line(&cat);
+        assert!(line.contains("LOO err n/a"), "no loo: {line}");
+        assert!(line.contains("✗untrusted"), "trust mark: {line}");
+    }
 }
 
 /// Show learned value-drivers for a category (or list categories with no arg).
@@ -71,10 +214,7 @@ pub async fn insights(
                 } else {
                     let mut lines = String::new();
                     for c in trusted.iter().take(25) {
-                        lines.push_str(&format!(
-                            "• **{}** — {} listings (median {:.1} div)\n",
-                            c.category, c.sample_size, c.base_median
-                        ));
+                        lines.push_str(&format!("• {}\n", calibration_line(c)));
                     }
                     lines.push_str("\nPass one, e.g. `/insights category:Staff`.");
                     serenity::CreateEmbed::default()
@@ -142,6 +282,7 @@ pub async fn insights(
                                 ));
                             }
                         }
+                        body.push_str(&gate_section(&cat.undersampled_gates, catalog));
                         serenity::CreateEmbed::default()
                             .title(format!("{canon} — value drivers"))
                             .description(body)

@@ -45,7 +45,7 @@ fn mod_strength(trusted_lift: Option<f64>, tier: Option<u8>) -> f64 {
 /// Cornerstone affixes are searched *exact* (min = roll, no max) because a worse
 /// roll is a materially different item: `+X to skill levels` and movement speed.
 /// This is the one hand-coded value-known; everything else is banded/relaxed.
-fn is_cornerstone(raw: &str) -> bool {
+pub(crate) fn is_cornerstone(raw: &str) -> bool {
     let l = raw.to_lowercase();
     l.contains("movement speed") || (l.contains("to level of") && l.contains("skill"))
 }
@@ -922,7 +922,7 @@ mod tests {
 
         // sample_size = 55 >= MIN_CATEGORY_SAMPLE(50). ✓
         assert!(obs.len() >= MIN_CATEGORY_SAMPLE);
-        crate::trade::value::ValueModel::build(&obs)
+        crate::trade::value::ValueModel::build(&obs, &crate::trade::stats::StatCatalog::default())
     }
 
     #[test]

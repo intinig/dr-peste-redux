@@ -22,13 +22,15 @@ pub async fn autocomplete_harvest_category<'a>(
     futures::stream::iter(names)
 }
 
-/// Harvest a whole item category into the observation corpus, warming pricing data.
+/// Harvest a category into the corpus. Optionally filter by a specific mod stat id.
 #[poise::command(slash_command)]
 pub async fn harvest(
     ctx: Context<'_>,
     #[description = "Item category (e.g. Staff, Helmet)"]
     #[autocomplete = "autocomplete_harvest_category"]
     category: String,
+    #[description = "Optional: stat id to target (e.g. explicit.stat_…). Filters the sweep to items with this mod."]
+    stat_mod: Option<String>,
 ) -> Result<(), Error> {
     let data = ctx.data();
 
@@ -53,26 +55,40 @@ pub async fn harvest(
         return Ok(()); // user dismissed / timed out / invalid (already messaged)
     };
 
+    // Built once and reused in both the progress and completion messages.
+    let suffix = stat_mod
+        .as_deref()
+        .map(|sid| format!(" (mod: `{sid}`)"))
+        .unwrap_or_default();
+
     let reply = ctx
         .send(poise::CreateReply::default().content(format!(
-            "⏳ Harvesting **{category}** — this runs several searches against your account…"
+            "⏳ Harvesting **{category}**{suffix} — this runs several searches against your account…"
         )))
         .await?;
 
-    match data
-        .pricer
-        .harvest(&category_id, &category, &snap.league.name, &session)
-        .await
-    {
+    let result = if let Some(ref sid) = stat_mod {
+        data.pricer
+            .harvest_mod(&category_id, &category, &snap.league.name, sid, &session)
+            .await
+    } else {
+        data.pricer
+            .harvest(&category_id, &category, &snap.league.name, &session)
+            .await
+    };
+
+    match result {
         Ok(n) => {
             // Rebuild the value model off the async executor — a whole-corpus
             // read + aggregation shouldn't block the runtime worker thread.
             let log_path = data.config.observation_log_path.clone();
             let value = data.value.clone();
+            let catalog = data.pricer.catalog().clone();
             let _ = tokio::task::spawn_blocking(move || {
                 crate::trade::value::rebuild_into(
                     &crate::observe::ObservationLog::new(&log_path),
                     &value,
+                    &catalog,
                 );
             })
             .await;
@@ -80,7 +96,7 @@ pub async fn harvest(
                 .edit(
                     ctx,
                     poise::CreateReply::default().content(format!(
-                        "Harvested **{category}**: logged {n} market observations to the corpus."
+                        "Harvested **{category}**{suffix}: logged {n} market observations to the corpus."
                     )),
                 )
                 .await?;

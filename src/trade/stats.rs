@@ -89,7 +89,7 @@ struct RawEntry {
 }
 
 /// Maps normalized mod text → stat id, per group.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct StatCatalog {
     groups: HashMap<StatGroup, HashMap<String, String>>,
     /// stat_id -> original display text, for reverse lookup in /insights.

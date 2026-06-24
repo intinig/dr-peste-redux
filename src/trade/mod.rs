@@ -153,6 +153,57 @@ impl<C: Comparables> TradePricer<C> {
         Ok(bd)
     }
 
+    /// Return a k-NN value estimate from the learned `ValueModel` for `item` in
+    /// `league`, or `None` when:
+    /// - `item.item_class` is absent,
+    /// - the category has no model for this league,
+    /// - the category is under-sampled (`sample_size < TRUST_MIN_SAMPLE`), or
+    /// - the LOO back-test error exceeds `TRUST_MAX_ERROR`.
+    ///
+    /// The method is intentionally synchronous — it only reads the in-memory
+    /// model; no I/O is performed.
+    #[allow(dead_code)]
+    pub fn learned_estimate(
+        &self,
+        item: &ParsedItem,
+        league: &str,
+    ) -> Option<crate::trade::value::estimate::ValueEstimate> {
+        // 1. Canonical category from item class.
+        let canon = crate::trade::value::canonical_category(item.item_class.as_deref()?);
+
+        // 2. Poison-safe model read.
+        let model = self.value.read().unwrap_or_else(|e| e.into_inner());
+
+        // 3. Category lookup.
+        let cat = model.category(league, &canon)?;
+
+        // 4. Trust bar.
+        let trusted = cat.sample_size >= crate::trade::value::TRUST_MIN_SAMPLE
+            && cat
+                .loo_error
+                .map(|e| e <= crate::trade::value::TRUST_MAX_ERROR)
+                .unwrap_or(false);
+        if !trusted {
+            return None;
+        }
+
+        // 5. Resolve explicit mods to (stat_id, raw_roll).
+        let resolved: Vec<(String, Option<f64>)> = item
+            .explicits
+            .iter()
+            .filter_map(|m| {
+                let id = self
+                    .catalog
+                    .match_stat(&m.raw, crate::trade::stats::StatGroup::Explicit)?;
+                Some((id, m.value))
+            })
+            .collect();
+
+        // 6. Build normalised query and estimate.
+        let query = cat.query_from_stats(&resolved);
+        cat.estimate(&query)
+    }
+
     /// Append one `Observation { source: Paste }` per fetched comparable. Best-
     /// effort: a write failure is logged, never fatal.
     fn log_observations(&self, item: &ParsedItem, league: &str, listings: &[Listing]) {
@@ -187,25 +238,17 @@ impl<C: Comparables> TradePricer<C> {
 }
 
 impl<C: Comparables + crate::trade::client::TradeApi> TradePricer<C> {
-    /// Price-band sweep of a whole category, logging every listing to the corpus
-    /// as a Harvest observation. Returns the number of observations logged. Each
-    /// search/fetch is throttle-paced by the member session; a per-band failure is
-    /// logged and skipped so one bad band doesn't abort the whole harvest.
-    pub async fn harvest(
+    /// Core adaptive price-band sweep. `base_query` is a `TradeQuery` template
+    /// carrying the category (and optionally a stats filter); each band query is
+    /// built by cloning the template and setting `min_price_divine`/`max_price_divine`.
+    /// Returns the number of observations logged in this sweep.
+    async fn harvest_sweep(
         &self,
-        category_id: &str,
+        base_query: &crate::trade::model::TradeQuery,
         category_text: &str,
-        league: &str,
         session: &TradeSession,
     ) -> Result<usize> {
         let mut logged = 0usize;
-        // Disjoint, bounded price bands `[lo, hi)` (last open-ended). Bounding each
-        // band by max — and sampling evenly across the price-sorted results rather
-        // than taking the cheapest prefix — keeps each band's sample representative
-        // across its whole range instead of repeatedly oversampling the global cheap
-        // end. Dedup by listing id across bands so a boundary item appearing in two
-        // adjacent bands is logged once; empty ids can't be deduped, so are always
-        // logged.
         let timestamp_unix = crate::trade::age::now_unix();
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         // Adaptive price-band sweep. trade2 `/search` caps its result list at ~100
@@ -224,14 +267,9 @@ impl<C: Comparables + crate::trade::client::TradeApi> TradePricer<C> {
             .collect();
         while let Some((lo, hi, depth)) = stack.pop() {
             let q = crate::trade::model::TradeQuery {
-                league: league.to_string(),
-                category: Some(category_id.to_string()),
-                type_line: None,
-                stats: vec![],
-                misc: crate::trade::model::MiscFilters::default(),
-                equipment: vec![],
                 min_price_divine: if lo > 0.0 { Some(lo) } else { None },
                 max_price_divine: hi,
+                ..base_query.clone()
             };
             let resp = match self.comparables.search(&q, session).await {
                 Ok(r) => r,
@@ -290,7 +328,7 @@ impl<C: Comparables + crate::trade::client::TradeApi> TradePricer<C> {
                 }
                 let obs = Observation {
                     timestamp_unix,
-                    league: league.to_string(),
+                    league: base_query.league.clone(),
                     base_type: l.base_type.clone(),
                     category: Some(category_text.to_string()),
                     mods: l.mods.clone(),
@@ -306,6 +344,69 @@ impl<C: Comparables + crate::trade::client::TradeApi> TradePricer<C> {
             }
         }
         Ok(logged)
+    }
+
+    /// Price-band sweep of a whole category, logging every listing to the corpus
+    /// as a Harvest observation. Returns the number of observations logged. Each
+    /// search/fetch is throttle-paced by the member session; a per-band failure is
+    /// logged and skipped so one bad band doesn't abort the whole harvest.
+    pub async fn harvest(
+        &self,
+        category_id: &str,
+        category_text: &str,
+        league: &str,
+        session: &TradeSession,
+    ) -> Result<usize> {
+        // Disjoint, bounded price bands `[lo, hi)` (last open-ended). Bounding each
+        // band by max — and sampling evenly across the price-sorted results rather
+        // than taking the cheapest prefix — keeps each band's sample representative
+        // across its whole range instead of repeatedly oversampling the global cheap
+        // end. Dedup by listing id across bands so a boundary item appearing in two
+        // adjacent bands is logged once; empty ids can't be deduped, so are always
+        // logged.
+        let base_query = crate::trade::model::TradeQuery {
+            league: league.to_string(),
+            category: Some(category_id.to_string()),
+            type_line: None,
+            stats: vec![],
+            misc: crate::trade::model::MiscFilters::default(),
+            equipment: vec![],
+            min_price_divine: None,
+            max_price_divine: None,
+        };
+        self.harvest_sweep(&base_query, category_text, session)
+            .await
+    }
+
+    /// Targeted price-band sweep for items carrying a specific mod (`stat_id`).
+    /// Every band query carries a presence `StatFilter` (the stat id, no min/max)
+    /// so every fetched listing has the gate mod. Uses the same adaptive bisecting
+    /// sweep as `harvest`; one mod at a time to stay polite to the rate limiter.
+    pub async fn harvest_mod(
+        &self,
+        category_id: &str,
+        category_text: &str,
+        league: &str,
+        stat_id: &str,
+        session: &TradeSession,
+    ) -> Result<usize> {
+        let base_query = crate::trade::model::TradeQuery {
+            league: league.to_string(),
+            category: Some(category_id.to_string()),
+            type_line: None,
+            stats: vec![crate::trade::model::StatFilter {
+                id: stat_id.to_string(),
+                label: String::new(),
+                min: None,
+                max: None,
+            }],
+            misc: crate::trade::model::MiscFilters::default(),
+            equipment: vec![],
+            min_price_divine: None,
+            max_price_divine: None,
+        };
+        self.harvest_sweep(&base_query, category_text, session)
+            .await
     }
 }
 
@@ -707,6 +808,213 @@ mod tests {
         assert!(stride_sample::<i32>(&[1, 2, 3], 0).is_empty());
     }
 
+    // ──────────────────────────────────────────────────────────────────────────
+    // learned_estimate helpers and tests
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// Build a `ValueModel` with ≥`TRUST_MIN_SAMPLE` uniform observations for
+    /// the "Staff" category (item class "Staves") in league "Standard".  All
+    /// items are priced at `price_divine` and carry `stat_id`.  With a
+    /// homogeneous corpus, LOO error = 0 (each item predicts its neighbours
+    /// exactly) which satisfies `<= TRUST_MAX_ERROR`.
+    fn trusted_staff_model(stat_id: &str, price_divine: f64) -> crate::trade::value::ValueModel {
+        use crate::observe::{Observation, Source};
+        use crate::trade::model::ListingMod;
+        use crate::trade::value::TRUST_MIN_SAMPLE;
+
+        let n = TRUST_MIN_SAMPLE + 10; // 90 observations
+        let obs: Vec<Observation> = (0..n as u64)
+            .map(|i| Observation {
+                timestamp_unix: i,
+                league: "Standard".into(),
+                base_type: Some("Chiming Staff".into()),
+                // "Staves" is the clipboard plural → canonical_category gives "Staff"
+                category: Some("Staves".into()),
+                mods: vec![ListingMod {
+                    stat_id: stat_id.into(),
+                    tier: None,
+                    roll: None,
+                }],
+                price_divine,
+                source: Source::Harvest,
+                indexed: None,
+            })
+            .collect();
+        crate::trade::value::ValueModel::build(&obs, &crate::trade::stats::StatCatalog::default())
+    }
+
+    fn staff_item_with_stat(stat_raw: &str, stat_value: f64) -> ParsedItem {
+        ParsedItem {
+            rarity: Rarity::Rare,
+            name: "Onslaught Spell".into(),
+            base_type: Some("Chiming Staff".into()),
+            item_class: Some("Staves".into()),
+            item_level: Some(80),
+            quality: None,
+            corrupted: false,
+            energy_shield: None,
+            armour: None,
+            evasion: None,
+            implicits: vec![],
+            enchants: vec![],
+            runes: vec![],
+            explicits: vec![ItemStat {
+                raw: stat_raw.into(),
+                value: Some(stat_value),
+                affix: None,
+                tier: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn learned_estimate_trusted_category_returns_estimate_near_seeded_price() {
+        use crate::trade::stats::StatCatalog;
+        // The stat catalog must match the raw stat line to a stat_id; use the
+        // sample fixture for "80% increased Spell Damage" → "explicit.stat_spell_dmg".
+        let catalog = StatCatalog::from_json(include_str!("fixtures/stats_sample.json")).unwrap();
+        let model = trusted_staff_model("explicit.stat_spell_dmg", 10.0);
+        let pricer = TradePricer::new(
+            Flat(0.0), // not used by learned_estimate
+            crate::trade::pseudo::PseudoMap::load(),
+            catalog,
+            crate::observe::ObservationLog::new(
+                tempfile::tempdir().unwrap().path().join("obs.jsonl"),
+            ),
+            std::sync::Arc::new(std::sync::RwLock::new(model)),
+        );
+        let item = staff_item_with_stat("80% increased Spell Damage", 80.0);
+        let est = pricer.learned_estimate(&item, "Standard");
+        assert!(
+            est.is_some(),
+            "trusted category should return an estimate; got None"
+        );
+        let est = est.unwrap();
+        // Seeded price is 10.0 div; estimate should be in a reasonable range.
+        assert!(
+            est.value_divine > 0.0,
+            "estimate value should be positive, got {}",
+            est.value_divine
+        );
+    }
+
+    #[test]
+    fn learned_estimate_untrusted_category_returns_none() {
+        use crate::observe::{Observation, Source};
+        use crate::trade::model::ListingMod;
+        use crate::trade::stats::StatCatalog;
+        use crate::trade::value::TRUST_MIN_SAMPLE;
+
+        // Build a model with fewer than TRUST_MIN_SAMPLE (80) observations.
+        let n = TRUST_MIN_SAMPLE - 1; // 79 — below trust bar
+        let obs: Vec<Observation> = (0..n as u64)
+            .map(|i| Observation {
+                timestamp_unix: i,
+                league: "Standard".into(),
+                base_type: Some("Chiming Staff".into()),
+                category: Some("Staves".into()),
+                mods: vec![ListingMod {
+                    stat_id: "explicit.stat_spell_dmg".into(),
+                    tier: None,
+                    roll: None,
+                }],
+                price_divine: 10.0,
+                source: Source::Harvest,
+                indexed: None,
+            })
+            .collect();
+        let model = crate::trade::value::ValueModel::build(
+            &obs,
+            &crate::trade::stats::StatCatalog::default(),
+        );
+
+        let catalog = StatCatalog::from_json(include_str!("fixtures/stats_sample.json")).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let pricer = TradePricer::new(
+            Flat(0.0),
+            crate::trade::pseudo::PseudoMap::load(),
+            catalog,
+            crate::observe::ObservationLog::new(dir.path().join("obs.jsonl")),
+            std::sync::Arc::new(std::sync::RwLock::new(model)),
+        );
+        let item = staff_item_with_stat("80% increased Spell Damage", 80.0);
+        let est = pricer.learned_estimate(&item, "Standard");
+        assert!(
+            est.is_none(),
+            "thin category (n={n} < TRUST_MIN_SAMPLE) should return None"
+        );
+    }
+
+    #[test]
+    fn learned_estimate_no_item_class_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let pricer = TradePricer::new(
+            Flat(0.0),
+            crate::trade::pseudo::PseudoMap::load(),
+            crate::trade::stats::StatCatalog::default(),
+            crate::observe::ObservationLog::new(dir.path().join("obs.jsonl")),
+            std::sync::Arc::new(std::sync::RwLock::new(
+                crate::trade::value::ValueModel::default(),
+            )),
+        );
+        let mut item = staff_item_with_stat("80% increased Spell Damage", 80.0);
+        item.item_class = None; // no item class → canonical_category can't run
+        let est = pricer.learned_estimate(&item, "Standard");
+        assert!(est.is_none(), "missing item_class must return None");
+    }
+
+    #[test]
+    fn learned_estimate_high_loo_error_returns_none() {
+        // Exercises the RIGHT-HAND branch of the trust bar: a category that CLEARS
+        // the sample-size gate (sample_size >= TRUST_MIN_SAMPLE) but whose LOO
+        // back-test error exceeds TRUST_MAX_ERROR must still return None. Without
+        // this, a model that fits poorly out-of-sample could be trusted.
+        use crate::trade::stats::StatCatalog;
+        use crate::trade::value::estimate::SimWeights;
+        use crate::trade::value::itemvec::ItemVector;
+        use crate::trade::value::{CategoryModel, TRUST_MAX_ERROR, TRUST_MIN_SAMPLE};
+
+        // Plenty of neighbours sharing the query stat, so estimate() WOULD succeed
+        // if the trust check were bypassed — proving None comes from loo_error, not
+        // a missing-neighbour shortfall.
+        let items: Vec<ItemVector> = (0..20)
+            .map(|i| ItemVector {
+                mods: vec![("explicit.stat_spell_dmg".to_string(), Some(0.5))],
+                price_divine: 10.0 + i as f64,
+            })
+            .collect();
+        let cat = CategoryModel {
+            category: "Staff".to_string(),
+            sample_size: TRUST_MIN_SAMPLE + 10, // clears the sample-size gate
+            base_median: 10.0,
+            items,
+            weights: SimWeights {
+                jaccard: 1.0,
+                roll: 0.0,
+            },
+            loo_error: Some(TRUST_MAX_ERROR + 0.01), // 0.51 > 0.50 → above the bar
+            ..Default::default()
+        };
+        let model = crate::trade::value::ValueModel::with_category("Standard", cat);
+
+        let catalog = StatCatalog::from_json(include_str!("fixtures/stats_sample.json")).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let pricer = TradePricer::new(
+            Flat(0.0),
+            crate::trade::pseudo::PseudoMap::load(),
+            catalog,
+            crate::observe::ObservationLog::new(dir.path().join("obs.jsonl")),
+            std::sync::Arc::new(std::sync::RwLock::new(model)),
+        );
+        let item = staff_item_with_stat("80% increased Spell Damage", 80.0);
+        let est = pricer.learned_estimate(&item, "Standard");
+        assert!(
+            est.is_none(),
+            "loo_error {:?} > TRUST_MAX_ERROR ({TRUST_MAX_ERROR}) must return None",
+            TRUST_MAX_ERROR + 0.01
+        );
+    }
+
     #[tokio::test]
     async fn harvest_subdivides_dense_value_bands() {
         use crate::trade::client::TradeApi;
@@ -832,5 +1140,127 @@ mod tests {
             prices.iter().any(|&p| p > 20.0 && p < 50.0),
             "fetched a sub-band floor strictly inside (20,50), not just the band edge"
         );
+    }
+
+    /// `harvest_mod` must include the pinned stat id in every band query's `stats`
+    /// vec. Uses a fake `TradeApi` that records every `TradeQuery` it receives so
+    /// we can assert post-hoc that each query carries the expected `StatFilter`.
+    #[tokio::test]
+    async fn harvest_mod_pins_stat_id_in_every_band_query() {
+        use crate::trade::client::TradeApi;
+        use crate::trade::model::{SearchResponse, StatFilter};
+        use std::sync::Mutex;
+
+        struct ModHarvestFake {
+            queries: Mutex<Vec<TradeQuery>>,
+        }
+        #[async_trait]
+        impl Comparables for ModHarvestFake {
+            async fn comparables(
+                &self,
+                _q: &TradeQuery,
+                _l: usize,
+                _mr: usize,
+                _mm: usize,
+                _s: &TradeSession,
+            ) -> anyhow::Result<Vec<Listing>> {
+                Ok(vec![])
+            }
+        }
+        #[async_trait]
+        impl TradeApi for ModHarvestFake {
+            async fn search(
+                &self,
+                q: &TradeQuery,
+                _s: &TradeSession,
+            ) -> anyhow::Result<SearchResponse> {
+                self.queries.lock().unwrap().push(q.clone());
+                let band = q.min_price_divine.unwrap_or(0.0);
+                Ok(SearchResponse {
+                    id: format!("q{band}"),
+                    total: 1,
+                    hashes: vec![format!("h{band}")],
+                })
+            }
+            async fn fetch(
+                &self,
+                _id: &str,
+                hashes: &[String],
+                _s: &TradeSession,
+            ) -> anyhow::Result<Vec<Listing>> {
+                Ok(hashes
+                    .iter()
+                    .map(|h| Listing {
+                        price: Money {
+                            amount: 1.0,
+                            currency: Currency::Divine,
+                        },
+                        price_divine: 1.0,
+                        explicit_count: 1,
+                        id: h.clone(),
+                        base_type: Some("Chiming Staff".into()),
+                        mods: vec![crate::trade::model::ListingMod {
+                            stat_id: "explicit.stat_gate".into(),
+                            tier: Some(1),
+                            roll: Some(50.0),
+                        }],
+                        indexed: None,
+                    })
+                    .collect())
+            }
+        }
+
+        const TARGET_STAT: &str = "explicit.stat_gate";
+
+        let dir = tempfile::tempdir().unwrap();
+        let pricer = TradePricer::new(
+            ModHarvestFake {
+                queries: Mutex::new(vec![]),
+            },
+            crate::trade::pseudo::PseudoMap::load(),
+            crate::trade::stats::StatCatalog::default(),
+            crate::observe::ObservationLog::new(dir.path().join("obs.jsonl")),
+            std::sync::Arc::new(std::sync::RwLock::new(
+                crate::trade::value::ValueModel::default(),
+            )),
+        );
+        let n = pricer
+            .harvest_mod(
+                "weapon.staff",
+                "Staff",
+                "Standard",
+                TARGET_STAT,
+                &TradeSession::for_test(),
+            )
+            .await
+            .unwrap();
+
+        // Exactly one observation logged per band (the fake returns one per band).
+        assert_eq!(n, PRICE_BANDS.len(), "expected exactly one obs per band");
+
+        // Every search query must carry exactly the pinned stat filter.
+        let queries = pricer.comparables.queries.lock().unwrap();
+        assert_eq!(
+            queries.len(),
+            PRICE_BANDS.len(),
+            "expected one search per band"
+        );
+        for q in queries.iter() {
+            assert_eq!(
+                q.stats.len(),
+                1,
+                "each band query must carry exactly one StatFilter"
+            );
+            assert_eq!(
+                q.stats[0],
+                StatFilter {
+                    id: TARGET_STAT.to_string(),
+                    label: String::new(),
+                    min: None,
+                    max: None,
+                },
+                "pinned stat filter must match the requested stat_id"
+            );
+        }
     }
 }
