@@ -96,14 +96,32 @@ pub(crate) fn weighted_median(scored: &[(f64, f64)]) -> f64 {
     v.last().map(|(_, p)| *p).unwrap_or(0.0)
 }
 
-#[allow(dead_code)] // Phase 1: used by CategoryModel::estimate; not called in Phase 0.
-fn relative_spread(prices: &[f64], center: f64) -> f64 {
-    if center <= 0.0 || prices.is_empty() {
-        return f64::INFINITY;
+/// Linear-interpolation percentile of an ascending-sorted slice. `p` in [0,1].
+/// Matches the live ablation's percentile method so the fallback range reads
+/// consistently with live prices.
+pub(crate) fn percentile_sorted(sorted: &[f64], p: f64) -> f64 {
+    match sorted.len() {
+        0 => 0.0,
+        1 => sorted[0],
+        n => {
+            let rank = p * (n - 1) as f64;
+            let lo = rank.floor() as usize;
+            let hi = rank.ceil() as usize;
+            sorted[lo] + (sorted[hi] - sorted[lo]) * (rank - lo as f64)
+        }
     }
-    let mut dev: Vec<f64> = prices.iter().map(|p| (p - center).abs()).collect();
-    dev.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    dev[dev.len() / 2] / center // median abs deviation / center
+}
+
+/// A corpus-derived price range (floor/fair/ask = p20/p50/p80) with band-width
+/// confidence. The secondary `/paste` fallback when live ablation yields nothing.
+#[allow(dead_code)] // Phase 1: constructed by range_estimate; surfaced to /paste in Task 2.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RangeEstimate {
+    pub floor: f64,
+    pub fair: f64,
+    pub ask: f64,
+    pub confidence: Confidence,
+    pub pool: usize,
 }
 
 impl crate::trade::value::CategoryModel {
@@ -118,37 +136,68 @@ impl crate::trade::value::CategoryModel {
             .collect()
     }
 
-    #[allow(dead_code)] // Phase 1: called by TradePricer::learned_estimate; not wired to /paste in Phase 0.
-    pub fn estimate(&self, query: &[(String, Option<f64>)]) -> Option<ValueEstimate> {
-        if self.items.is_empty() {
+    /// Range estimate from an exact-mod-set-first, adaptive-K comparable pool, or
+    /// `None` (abstain) on a thin/dissimilar pool or a top-decile result. Pool
+    /// membership is by mod-SET only (roll is not a price-shifter).
+    #[allow(dead_code)] // Phase 1: wired to TradePricer and /paste in Tasks 2–3.
+    pub fn range_estimate(&self, query: &[(String, Option<f64>)]) -> Option<RangeEstimate> {
+        use crate::trade::value::{MIN_POOL, RELAX_JACCARD};
+        use std::collections::HashSet;
+        if self.items.is_empty() || query.is_empty() {
             return None;
         }
-        let mut scored: Vec<(f64, f64)> = self
+        let qset: HashSet<&str> = query.iter().map(|(s, _)| s.as_str()).collect();
+        let jaccard = |it: &super::itemvec::ItemVector| -> f64 {
+            let iset: HashSet<&str> = it.mods.iter().map(|(s, _)| s.as_str()).collect();
+            let inter = qset.iter().filter(|s| iset.contains(**s)).count();
+            let union = qset.len() + iset.len() - inter;
+            if union == 0 {
+                0.0
+            } else {
+                inter as f64 / union as f64
+            }
+        };
+        // Exact mod-set first (Jaccard == 1.0); relax to Jaccard >= RELAX_JACCARD only
+        // if the exact pool is thinner than MIN_POOL. Adaptive K: take ALL that qualify.
+        let mut pool: Vec<f64> = self
             .items
             .iter()
-            .map(|it| (similarity(query, it, self.weights), it.price_divine))
-            .filter(|(s, _)| *s > 0.0)
+            .filter(|it| jaccard(it) >= 1.0)
+            .map(|it| it.price_divine)
             .collect();
-        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        scored.truncate(super::K_NEIGHBORS);
-        if scored.len() < super::MIN_NEIGHBORS {
-            return None;
+        if pool.len() < MIN_POOL {
+            pool = self
+                .items
+                .iter()
+                .filter(|it| jaccard(it) >= RELAX_JACCARD)
+                .map(|it| it.price_divine)
+                .collect();
         }
-        let value_divine = weighted_median(&scored);
-        let top_sim = scored[0].0;
-        let prices: Vec<f64> = scored.iter().map(|(_, p)| *p).collect();
-        let spread = relative_spread(&prices, value_divine);
-        let confidence = if scored.len() >= super::K_NEIGHBORS && top_sim >= 0.6 && spread <= 0.5 {
+        if pool.len() < MIN_POOL {
+            return None; // abstain: no credible comparable pool
+        }
+        pool.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let floor = percentile_sorted(&pool, 0.20);
+        let fair = percentile_sorted(&pool, 0.50);
+        let ask = percentile_sorted(&pool, 0.80);
+        if let Some(td) = self.top_decile_price {
+            if fair >= td {
+                return None; // abstain: corpus underprices the expensive tail → live
+            }
+        }
+        let confidence = if floor > 0.0 && ask <= 2.0 * floor {
             Confidence::High
-        } else if scored.len() >= super::MIN_NEIGHBORS * 2 && spread <= 1.0 {
+        } else if floor > 0.0 && ask <= 5.0 * floor {
             Confidence::Medium
         } else {
             Confidence::Low
         };
-        Some(ValueEstimate {
-            value_divine,
+        Some(RangeEstimate {
+            floor,
+            fair,
+            ask,
             confidence,
-            neighbors: scored.len(),
+            pool: pool.len(),
         })
     }
 }
@@ -157,6 +206,113 @@ impl crate::trade::value::CategoryModel {
 mod tests {
     use super::*;
     use crate::trade::value::itemvec::ItemVector;
+
+    fn iv(stats: &[&str], price: f64) -> ItemVector {
+        ItemVector {
+            mods: stats.iter().map(|s| ((*s).to_string(), None)).collect(),
+            price_divine: price,
+        }
+    }
+    fn model_with(
+        items: Vec<ItemVector>,
+        top_decile: Option<f64>,
+    ) -> crate::trade::value::CategoryModel {
+        crate::trade::value::CategoryModel {
+            items,
+            top_decile_price: top_decile,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn range_estimate_uses_exact_mod_set_pool() {
+        let mut items: Vec<ItemVector> =
+            (1..=10).map(|i| iv(&["a", "b"], i as f64 * 10.0)).collect();
+        for _ in 0..10 {
+            items.push(iv(&["c"], 1.0));
+        }
+        let m = model_with(items, None);
+        let q = vec![("a".to_string(), None), ("b".to_string(), None)];
+        let r = m.range_estimate(&q).expect("exact pool has >= MIN_POOL");
+        assert!(
+            r.floor >= 10.0 && r.ask <= 100.0 && r.floor < r.fair && r.fair < r.ask,
+            "{r:?}"
+        );
+        assert_eq!(r.pool, 10, "only exact-mod-set items in the pool");
+    }
+
+    #[test]
+    fn range_estimate_relaxes_when_exact_too_thin() {
+        let mut items = vec![iv(&["a", "b", "c"], 50.0), iv(&["a", "b", "c"], 60.0)];
+        for i in 0..10 {
+            items.push(iv(&["a", "b"], 40.0 + i as f64));
+        }
+        items.push(iv(&["x"], 999.0));
+        let m = model_with(items, None);
+        let q = vec![("a".into(), None), ("b".into(), None), ("c".into(), None)];
+        let r = m.range_estimate(&q).expect("relaxed pool has >= MIN_POOL");
+        assert!(
+            r.pool >= 8 && r.ask < 999.0,
+            "relaxed pool excludes the J=0 item: {r:?}"
+        );
+    }
+
+    #[test]
+    fn range_estimate_abstains_on_thin_dissimilar_pool() {
+        let items: Vec<ItemVector> = (0..20).map(|_| iv(&["a"], 5.0)).collect();
+        let m = model_with(items, None);
+        let q = vec![("zzz".into(), None)];
+        assert!(
+            m.range_estimate(&q).is_none(),
+            "no credible comparable pool → abstain"
+        );
+    }
+
+    #[test]
+    fn range_estimate_abstains_on_top_decile() {
+        let items: Vec<ItemVector> = (0..12).map(|_| iv(&["a", "b"], 500.0)).collect();
+        let m = model_with(items, Some(400.0));
+        let q = vec![("a".into(), None), ("b".into(), None)];
+        assert!(
+            m.range_estimate(&q).is_none(),
+            "fair >= top decile → abstain, route to live"
+        );
+    }
+
+    #[test]
+    fn range_estimate_confidence_from_band_width() {
+        let tight: Vec<ItemVector> = (0..12).map(|i| iv(&["a"], 100.0 + i as f64)).collect();
+        let r = model_with(tight, None)
+            .range_estimate(&[("a".into(), None)])
+            .unwrap();
+        assert_eq!(r.confidence, Confidence::High, "narrow band → High: {r:?}");
+    }
+
+    #[test]
+    fn range_estimate_ignores_roll_for_pool_membership() {
+        let items = vec![
+            ItemVector {
+                mods: vec![("a".into(), Some(0.1))],
+                price_divine: 10.0,
+            },
+            ItemVector {
+                mods: vec![("a".into(), Some(0.9))],
+                price_divine: 20.0,
+            },
+        ];
+        let mut all = items;
+        for i in 0..10 {
+            all.push(iv(&["a"], 12.0 + i as f64));
+        }
+        let m = model_with(all, None);
+        let r = m
+            .range_estimate(&[("a".into(), Some(0.5))])
+            .expect("pool by mod-set, roll ignored");
+        assert!(
+            r.pool >= 12,
+            "all {{a}} items pooled regardless of roll: {r:?}"
+        );
+    }
 
     #[test]
     fn jaccard_weight_rewards_mod_overlap() {
@@ -201,50 +357,6 @@ mod tests {
         }
         .normalized();
         assert_eq!(similarity(&[], &item, w), 0.0);
-    }
-
-    #[test]
-    fn estimate_returns_weighted_median_of_neighbors() {
-        use crate::trade::value::CategoryModel;
-        let items = (0..10)
-            .map(|i| ItemVector {
-                mods: vec![("a".into(), Some(0.5)), ("b".into(), None)],
-                price_divine: 100.0 + i as f64, // 100..109
-            })
-            .collect();
-        let cat = CategoryModel {
-            items,
-            weights: SimWeights {
-                jaccard: 1.0,
-                roll: 0.0,
-            },
-            ..Default::default()
-        };
-        let est = cat
-            .estimate(&[("a".into(), Some(0.5)), ("b".into(), None)])
-            .expect("estimate");
-        assert!(est.value_divine >= 100.0 && est.value_divine <= 109.0);
-        assert!(est.neighbors >= super::super::MIN_NEIGHBORS);
-    }
-
-    #[test]
-    fn estimate_none_when_too_few_neighbors() {
-        use crate::trade::value::CategoryModel;
-        let cat = CategoryModel {
-            items: vec![ItemVector {
-                mods: vec![("a".into(), None)],
-                price_divine: 5.0,
-            }],
-            weights: SimWeights {
-                jaccard: 1.0,
-                roll: 0.0,
-            },
-            ..Default::default()
-        };
-        assert!(
-            cat.estimate(&[("a".into(), None)]).is_none(),
-            "1 neighbor < MIN_NEIGHBORS"
-        );
     }
 
     #[test]

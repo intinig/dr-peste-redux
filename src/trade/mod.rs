@@ -204,8 +204,9 @@ impl<C: Comparables> TradePricer<C> {
             .collect();
 
         // 6. Build normalised query and estimate.
-        let query = cat.query_from_stats(&resolved);
-        cat.estimate(&query)
+        // TODO(Task 2): replace with range_estimate + learned-weight path.
+        let _query = cat.query_from_stats(&resolved);
+        None
     }
 
     /// Append one `Observation { source: Paste }` per fetched comparable. Best-

@@ -35,6 +35,13 @@ pub const TRUST_MIN_SAMPLE: usize = 80;
 /// Relative divergence threshold between the learned corpus estimate and the
 /// live trade price above which the embed flags a warning.
 pub const DIVERGENCE_FLAG: f64 = 0.50;
+/// Minimum comparable-pool size for a corpus range; below it, abstain.
+#[allow(dead_code)] // Phase 1: used by CategoryModel::range_estimate; wired to /paste in Task 2.
+pub const MIN_POOL: usize = 8;
+/// When the exact-mod-set pool is thinner than MIN_POOL, relax to neighbours with at
+/// least this Jaccard overlap of mod-sets.
+#[allow(dead_code)] // Phase 1: used by CategoryModel::range_estimate; wired to /paste in Task 2.
+pub const RELAX_JACCARD: f64 = 0.6;
 
 pub mod backtest;
 pub mod estimate;
@@ -121,6 +128,10 @@ pub struct CategoryModel {
     pub weights: estimate::SimWeights,
     pub undersampled_gates: Vec<gates::GateCandidate>,
     pub calibration: backtest::Calibration,
+    /// p90 of this category's prices; the range estimator abstains when a query's
+    /// `fair` lands at/above it (the corpus underprices the expensive tail).
+    #[allow(dead_code)] // Phase 1: read by CategoryModel::range_estimate; surfaced in Task 2.
+    pub top_decile_price: Option<f64>,
 }
 
 impl CategoryModel {
@@ -346,6 +357,15 @@ fn build_category(
     let items = itemvec::build_item_vectors(obs, &mod_rolls);
     let (weights, calibration) = backtest::tune_and_calibrate(&items);
     let undersampled_gates = gates::detect_gates(&stats);
+    let top_decile_price = {
+        let mut ps: Vec<f64> = items.iter().map(|it| it.price_divine).collect();
+        if ps.is_empty() {
+            None
+        } else {
+            ps.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            Some(estimate::percentile_sorted(&ps, 0.90))
+        }
+    };
 
     CategoryModel {
         category,
@@ -358,6 +378,7 @@ fn build_category(
         weights,
         undersampled_gates,
         calibration,
+        top_decile_price,
     }
 }
 
