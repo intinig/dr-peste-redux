@@ -62,7 +62,7 @@ pub fn similarity(query: &[(String, Option<f64>)], item: &ItemVector, w: SimWeig
     w.jaccard * jac + w.roll * roll
 }
 
-#[allow(dead_code)] // Phase 1: returned by CategoryModel::estimate; not surfaced in Phase 0.
+#[allow(dead_code)] // Task 3: used by RangeEstimate → TradePricer::range_estimate → /paste.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Confidence {
     High,
@@ -114,7 +114,7 @@ pub(crate) fn percentile_sorted(sorted: &[f64], p: f64) -> f64 {
 
 /// A corpus-derived price range (floor/fair/ask = p20/p50/p80) with band-width
 /// confidence. The secondary `/paste` fallback when live ablation yields nothing.
-#[allow(dead_code)] // Phase 1: constructed by range_estimate; surfaced to /paste in Task 2.
+#[allow(dead_code)] // Task 3: constructed by range_estimate; surfaced to /paste.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RangeEstimate {
     pub floor: f64,
@@ -125,7 +125,7 @@ pub struct RangeEstimate {
 }
 
 impl crate::trade::value::CategoryModel {
-    #[allow(dead_code)] // Phase 1: called by TradePricer::learned_estimate; not wired to /paste in Phase 0.
+    #[allow(dead_code)] // Task 3: called by TradePricer::range_estimate → /paste.
     pub fn query_from_stats(&self, stats: &[(String, Option<f64>)]) -> Vec<(String, Option<f64>)> {
         stats
             .iter()
@@ -139,7 +139,7 @@ impl crate::trade::value::CategoryModel {
     /// Range estimate from an exact-mod-set-first, adaptive-K comparable pool, or
     /// `None` (abstain) on a thin/dissimilar pool or a top-decile result. Pool
     /// membership is by mod-SET only (roll is not a price-shifter).
-    #[allow(dead_code)] // Phase 1: wired to TradePricer and /paste in Tasks 2–3.
+    #[allow(dead_code)] // Task 3: called by TradePricer::range_estimate → /paste.
     pub fn range_estimate(&self, query: &[(String, Option<f64>)]) -> Option<RangeEstimate> {
         use crate::trade::value::{MIN_POOL, RELAX_JACCARD};
         use std::collections::HashSet;

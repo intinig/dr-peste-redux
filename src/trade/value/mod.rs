@@ -36,11 +36,11 @@ pub const TRUST_MIN_SAMPLE: usize = 80;
 /// live trade price above which the embed flags a warning.
 pub const DIVERGENCE_FLAG: f64 = 0.50;
 /// Minimum comparable-pool size for a corpus range; below it, abstain.
-#[allow(dead_code)] // Phase 1: used by CategoryModel::range_estimate; wired to /paste in Task 2.
+#[allow(dead_code)] // Task 3: consumed by CategoryModel::range_estimate → TradePricer::range_estimate → /paste.
 pub const MIN_POOL: usize = 8;
 /// When the exact-mod-set pool is thinner than MIN_POOL, relax to neighbours with at
 /// least this Jaccard overlap of mod-sets.
-#[allow(dead_code)] // Phase 1: used by CategoryModel::range_estimate; wired to /paste in Task 2.
+#[allow(dead_code)] // Task 3: consumed by CategoryModel::range_estimate → TradePricer::range_estimate → /paste.
 pub const RELAX_JACCARD: f64 = 0.6;
 
 pub mod backtest;
@@ -120,17 +120,18 @@ pub struct CategoryModel {
     /// Stats in deconfounded rank order (drivers first).
     pub stats: Vec<StatValue>,
     pub cooccurrences: Vec<ModPair>,
-    #[allow(dead_code)] // Phase 1: used by CategoryModel::estimate (learned k-NN path).
+    #[allow(dead_code)] // Task 3: read by query_from_stats → range_estimate → /paste.
     pub mod_rolls: HashMap<String, magnitude::RollStats>,
-    #[allow(dead_code)] // Phase 1: used by CategoryModel::estimate (learned k-NN path).
+    #[allow(dead_code)] // Task 3: read by range_estimate → /paste.
     pub items: Vec<itemvec::ItemVector>,
-    #[allow(dead_code)] // Phase 1: used by CategoryModel::estimate (learned k-NN path).
+    #[allow(dead_code)]
+    // Phase 1: similarity weights for the future k-NN path; stored but not yet read.
     pub weights: estimate::SimWeights,
     pub undersampled_gates: Vec<gates::GateCandidate>,
     pub calibration: backtest::Calibration,
     /// p90 of this category's prices; the range estimator abstains when a query's
     /// `fair` lands at/above it (the corpus underprices the expensive tail).
-    #[allow(dead_code)] // Phase 1: read by CategoryModel::range_estimate; surfaced in Task 2.
+    #[allow(dead_code)] // Task 3: read by range_estimate → /paste.
     pub top_decile_price: Option<f64>,
 }
 
