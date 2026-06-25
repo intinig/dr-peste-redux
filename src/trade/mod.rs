@@ -158,7 +158,6 @@ impl<C: Comparables> TradePricer<C> {
     /// item class absent, no model for the league, the category is not trusted, or the
     /// comparable pool is thin/dissimilar / top-decile. Surfaced on `/paste` only as the
     /// fallback when live ablation yields nothing. Synchronous (in-memory read only).
-    #[allow(dead_code)] // Task 3 wires this to /paste; not called from the binary yet.
     pub fn range_estimate(
         &self,
         item: &ParsedItem,
@@ -989,7 +988,7 @@ mod tests {
             sample_size: TRUST_MIN_SAMPLE + 10, // clears the sample-size gate
             base_median: 10.0,
             items,
-            weights: SimWeights {
+            _weights: SimWeights {
                 jaccard: 1.0,
                 roll: 0.0,
             },
