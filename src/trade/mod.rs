@@ -154,44 +154,23 @@ impl<C: Comparables> TradePricer<C> {
         Ok(bd)
     }
 
-    /// Return a k-NN value estimate from the learned `ValueModel` for `item` in
-    /// `league`, or `None` when:
-    /// - `item.item_class` is absent,
-    /// - the category has no model for this league, or
-    /// - the category is not trusted (`sample_size < TRUST_MIN_SAMPLE`, or no positive skill over the category-median baseline).
-    ///
-    /// The method is intentionally synchronous — it only reads the in-memory
-    /// model; no I/O is performed.
-    ///
-    /// **Phase 0 note:** this method is NOT wired to `/paste` output in Phase 0.
-    /// Phase 1 will replace the point estimate with calibrated ranges + abstention
-    /// before surfacing it to users.
-    #[allow(dead_code)] // Retained for Phase 1 (calibrated-range surfacing); not wired to /paste in Phase 0.
-    pub fn learned_estimate(
+    /// Corpus-derived price RANGE for `item` in `league`, or `None` (abstain) when:
+    /// item class absent, no model for the league, the category is not trusted, or the
+    /// comparable pool is thin/dissimilar / top-decile. Surfaced on `/paste` only as the
+    /// fallback when live ablation yields nothing. Synchronous (in-memory read only).
+    pub fn range_estimate(
         &self,
         item: &ParsedItem,
         league: &str,
-    ) -> Option<crate::trade::value::estimate::ValueEstimate> {
-        // 1. Canonical category from item class.
+    ) -> Option<crate::trade::value::estimate::RangeEstimate> {
         let canon = crate::trade::value::canonical_category(item.item_class.as_deref()?);
-
-        // 2. Poison-safe model read.
         let model = self.value.read().unwrap_or_else(|e| e.into_inner());
-
-        // 3. Category lookup.
         let cat = model.category(league, &canon)?;
-
-        // 4. Trust bar: enough samples AND positive skill over the no-feature baseline.
         if !cat.is_trusted() {
             return None;
         }
-
-        // 5. Resolve explicit mods to (stat_id, raw_roll).
-        // INVARIANT: the corpus stores EXPLICIT mods only (`ListingMod` is "one explicit
-        // mod on a fetched listing"), so the query must be built from explicits only —
-        // the k-NN similarity compares mod-sets, and mixing in implicits/runes here would
-        // desync the query's mod-set from the corpus's and skew Jaccard. If a future
-        // harvest ever captures implicits into `Observation.mods`, revisit this resolve.
+        // Explicit mods only (corpus stores explicits; mixing implicits/runes would
+        // desync the query's mod-set from the corpus's — see the original invariant).
         let resolved: Vec<(String, Option<f64>)> = item
             .explicits
             .iter()
@@ -202,10 +181,8 @@ impl<C: Comparables> TradePricer<C> {
                 Some((id, m.value))
             })
             .collect();
-
-        // 6. Build normalised query and estimate.
         let query = cat.query_from_stats(&resolved);
-        cat.estimate(&query)
+        cat.range_estimate(&query)
     }
 
     /// Append one `Observation { source: Paste }` per fetched comparable. Best-
@@ -813,53 +790,8 @@ mod tests {
     }
 
     // ──────────────────────────────────────────────────────────────────────────
-    // learned_estimate helpers and tests
+    // range_estimate helpers and tests
     // ──────────────────────────────────────────────────────────────────────────
-
-    /// Build a `ValueModel` with ≥`TRUST_MIN_SAMPLE` observations for the "Staff"
-    /// category (item class "Staves") in league "Standard". Items carry `stat_id`
-    /// with a roll that varies linearly from 0 to 1 across the corpus, and price
-    /// is set to `price_divine * (1 + roll)` so it tracks the roll. Each item
-    /// also carries a unique tag mod so every mod-set is distinct (self-exclusion
-    /// removes only the probe itself, not a whole group). The roll-price correlation
-    /// gives the k-NN genuine signal to beat the category-median baseline, producing
-    /// skill > 0 and making `is_trusted()` return true.
-    fn trusted_staff_model(stat_id: &str, price_divine: f64) -> crate::trade::value::ValueModel {
-        use crate::observe::{Observation, Source};
-        use crate::trade::model::ListingMod;
-        use crate::trade::value::TRUST_MIN_SAMPLE;
-
-        let n = TRUST_MIN_SAMPLE + 10; // 90 observations
-        let obs: Vec<Observation> = (0..n)
-            .map(|i| {
-                let roll = i as f64 / (n - 1) as f64; // 0.0 .. 1.0
-                Observation {
-                    timestamp_unix: i as u64,
-                    league: "Standard".into(),
-                    base_type: Some("Chiming Staff".into()),
-                    // "Staves" is the clipboard plural → canonical_category gives "Staff"
-                    category: Some("Staves".into()),
-                    mods: vec![
-                        ListingMod {
-                            stat_id: stat_id.into(),
-                            tier: None,
-                            roll: Some(roll * 100.0), // roll 0..100
-                        },
-                        // unique tag mod per item so self-exclusion removes only this item
-                        ListingMod {
-                            stat_id: format!("explicit.tag{i}"),
-                            tier: None,
-                            roll: None,
-                        },
-                    ],
-                    price_divine: price_divine * (1.0 + roll), // price tracks roll
-                    source: Source::Harvest,
-                    indexed: None,
-                }
-            })
-            .collect();
-        crate::trade::value::ValueModel::build(&obs, &crate::trade::stats::StatCatalog::default())
-    }
 
     fn staff_item_with_stat(stat_raw: &str, stat_value: f64) -> ParsedItem {
         ParsedItem {
@@ -886,38 +818,87 @@ mod tests {
     }
 
     #[test]
-    fn learned_estimate_trusted_category_returns_estimate_near_seeded_price() {
+    fn range_estimate_trusted_category_returns_range_near_seeded_price() {
+        use crate::observe::{Observation, Source};
+        use crate::trade::model::ListingMod;
         use crate::trade::stats::StatCatalog;
-        // The stat catalog must match the raw stat line to a stat_id; use the
-        // sample fixture for "80% increased Spell Damage" → "explicit.stat_spell_dmg".
+        use crate::trade::value::backtest::Calibration;
+        use crate::trade::value::{CategoryModel, TRUST_MIN_SAMPLE};
+
+        // Build a trusted CategoryModel whose corpus items share the SAME single mod
+        // ("explicit.stat_spell_dmg") without unique tags. Same-mod corpus means the
+        // query's Jaccard against every item is 1.0 — exact-pool membership — so
+        // range_estimate always builds a pool. (The trusted_staff_model fixture uses
+        // unique tag mods for k-NN self-exclusion, which would lower every Jaccard to
+        // 0.5 and starve the range pool; that fixture is only correct for k-NN tests.)
+        let stat_id = "explicit.stat_spell_dmg";
+        let n = TRUST_MIN_SAMPLE + 10; // 90 items — clears the trust bar
+                                       // Build the model's observation corpus so build_mod_rolls produces the quantile
+                                       // table for normalization and the calibration shows positive skill.
+        let obs: Vec<Observation> = (0..n)
+            .map(|i| {
+                let roll = i as f64 / (n - 1) as f64;
+                Observation {
+                    timestamp_unix: i as u64,
+                    league: "Standard".into(),
+                    base_type: Some("Chiming Staff".into()),
+                    category: Some("Staves".into()),
+                    mods: vec![ListingMod {
+                        stat_id: stat_id.into(),
+                        tier: None,
+                        roll: Some(roll * 100.0), // raw roll 0..100
+                    }],
+                    price_divine: 10.0 * (1.0 + roll),
+                    source: Source::Harvest,
+                    indexed: None,
+                }
+            })
+            .collect();
+        let built_cat = {
+            let m = crate::trade::value::ValueModel::build(
+                &obs,
+                &crate::trade::stats::StatCatalog::default(),
+            );
+            // Stamp the calibration with known-positive skill so is_trusted() passes.
+            let raw = m.category("Standard", "Staff").unwrap().clone();
+            CategoryModel {
+                calibration: Calibration {
+                    model_err: Some(0.3),
+                    baseline_err: Some(0.5),
+                    skill: Some(0.4), // positive → trusted
+                },
+                ..raw
+            }
+        };
+        let model = crate::trade::value::ValueModel::with_category("Standard", built_cat);
+
         let catalog = StatCatalog::from_json(include_str!("fixtures/stats_sample.json")).unwrap();
-        let model = trusted_staff_model("explicit.stat_spell_dmg", 10.0);
+        let dir = tempfile::tempdir().unwrap();
         let pricer = TradePricer::new(
-            Flat(0.0), // not used by learned_estimate
+            Flat(0.0), // not used by range_estimate
             crate::trade::pseudo::PseudoMap::load(),
             catalog,
-            crate::observe::ObservationLog::new(
-                tempfile::tempdir().unwrap().path().join("obs.jsonl"),
-            ),
+            crate::observe::ObservationLog::new(dir.path().join("obs.jsonl")),
             std::sync::Arc::new(std::sync::RwLock::new(model)),
         );
         let item = staff_item_with_stat("80% increased Spell Damage", 80.0);
-        let est = pricer.learned_estimate(&item, "Standard");
+        let r = pricer
+            .range_estimate(&item, "Standard")
+            .expect("trusted single-mod corpus should return a RangeEstimate; got None");
+        assert!(r.floor > 0.0, "floor should be positive, got {}", r.floor);
         assert!(
-            est.is_some(),
-            "trusted category should return an estimate; got None"
+            r.floor <= r.fair && r.fair <= r.ask,
+            "floor <= fair <= ask must hold: floor={} fair={} ask={}",
+            r.floor,
+            r.fair,
+            r.ask
         );
-        let est = est.unwrap();
-        // Seeded price is 10.0 div; estimate should be in a reasonable range.
-        assert!(
-            est.value_divine > 0.0,
-            "estimate value should be positive, got {}",
-            est.value_divine
-        );
+        // Pool covers the full corpus (all items share the single mod).
+        assert!(r.pool >= TRUST_MIN_SAMPLE, "pool too thin: {}", r.pool);
     }
 
     #[test]
-    fn learned_estimate_untrusted_category_returns_none() {
+    fn range_estimate_untrusted_category_returns_none() {
         use crate::observe::{Observation, Source};
         use crate::trade::model::ListingMod;
         use crate::trade::stats::StatCatalog;
@@ -956,7 +937,7 @@ mod tests {
             std::sync::Arc::new(std::sync::RwLock::new(model)),
         );
         let item = staff_item_with_stat("80% increased Spell Damage", 80.0);
-        let est = pricer.learned_estimate(&item, "Standard");
+        let est = pricer.range_estimate(&item, "Standard");
         assert!(
             est.is_none(),
             "thin category (n={n} < TRUST_MIN_SAMPLE) should return None"
@@ -964,7 +945,7 @@ mod tests {
     }
 
     #[test]
-    fn learned_estimate_no_item_class_returns_none() {
+    fn range_estimate_no_item_class_returns_none() {
         let dir = tempfile::tempdir().unwrap();
         let pricer = TradePricer::new(
             Flat(0.0),
@@ -977,12 +958,12 @@ mod tests {
         );
         let mut item = staff_item_with_stat("80% increased Spell Damage", 80.0);
         item.item_class = None; // no item class → canonical_category can't run
-        let est = pricer.learned_estimate(&item, "Standard");
+        let est = pricer.range_estimate(&item, "Standard");
         assert!(est.is_none(), "missing item_class must return None");
     }
 
     #[test]
-    fn learned_estimate_zero_skill_returns_none() {
+    fn range_estimate_zero_skill_returns_none() {
         // Exercises the RIGHT-HAND branch of the trust bar: a category that CLEARS
         // the sample-size gate (sample_size >= TRUST_MIN_SAMPLE) but whose calibration
         // shows no positive skill over the category-median baseline must return None.
@@ -993,9 +974,9 @@ mod tests {
         use crate::trade::value::itemvec::ItemVector;
         use crate::trade::value::{CategoryModel, TRUST_MIN_SAMPLE};
 
-        // Plenty of neighbours sharing the query stat, so estimate() WOULD succeed
+        // Plenty of neighbours sharing the query stat, so range_estimate() WOULD succeed
         // if the trust check were bypassed — proving None comes from zero skill, not
-        // a missing-neighbour shortfall.
+        // a thin-pool shortfall.
         let items: Vec<ItemVector> = (0..20)
             .map(|i| ItemVector {
                 mods: vec![("explicit.stat_spell_dmg".to_string(), Some(0.5))],
@@ -1007,7 +988,7 @@ mod tests {
             sample_size: TRUST_MIN_SAMPLE + 10, // clears the sample-size gate
             base_median: 10.0,
             items,
-            weights: SimWeights {
+            _weights: SimWeights {
                 jaccard: 1.0,
                 roll: 0.0,
             },
@@ -1031,7 +1012,7 @@ mod tests {
             std::sync::Arc::new(std::sync::RwLock::new(model)),
         );
         let item = staff_item_with_stat("80% increased Spell Damage", 80.0);
-        let est = pricer.learned_estimate(&item, "Standard");
+        let est = pricer.range_estimate(&item, "Standard");
         assert!(
             est.is_none(),
             "zero-skill calibration must return None (model no better than median baseline)"

@@ -112,12 +112,12 @@ async fn run_pricing(
         Ok(e) => e,
         Err(e) => {
             tracing::warn!(error = %e, "trade price failed");
+            let content = match pricer.range_estimate(parsed, &league.name) {
+                Some(r) => embeds::range_fallback_line(&parsed.name, &r),
+                None => "Couldn't reach trade right now — try again shortly.".to_string(),
+            };
             reply
-                .edit(
-                    *ctx,
-                    poise::CreateReply::default()
-                        .content("Couldn't reach trade right now — try again shortly."),
-                )
+                .edit(*ctx, poise::CreateReply::default().content(content))
                 .await?;
             return Ok(());
         }
@@ -137,6 +137,24 @@ async fn run_pricing(
         return Ok(());
     }
 
+    // Empty-listing fallback: live ablation found nothing — try corpus range before
+    // showing the empty embed (which is less useful).
+    if est.listing_count == 0 {
+        let content = match pricer.range_estimate(parsed, &league.name) {
+            Some(r) => embeds::range_fallback_line(&parsed.name, &r),
+            None => "No comparable listings found.".to_string(),
+        };
+        reply
+            .edit(
+                *ctx,
+                poise::CreateReply::default()
+                    .content(content)
+                    .components(vec![]),
+            )
+            .await?;
+        return Ok(());
+    }
+
     let secondary_rate = if matches!(est.modal_currency, crate::trade::model::Currency::Divine) {
         None
     } else {
@@ -148,10 +166,6 @@ async fn run_pricing(
             .and_then(|r| r.to_divine(1.0, &code))
     };
 
-    // Phase 0: corpus/learned pricing is not surfaced on /paste — Phase 1 replaces the
-    // point estimate with calibrated ranges + abstention.
-    // /insights still reports per-category skill via is_trusted().
-
     let button = serenity::CreateButton::new("drp_breakdown")
         .label("Break it down")
         .style(serenity::ButtonStyle::Secondary);
@@ -162,13 +176,7 @@ async fn run_pricing(
         .edit(
             *ctx,
             poise::CreateReply::default()
-                .embed(embeds::estimate_embed(
-                    parsed,
-                    &est,
-                    league,
-                    secondary_rate,
-                    None,
-                ))
+                .embed(embeds::estimate_embed(parsed, &est, league, secondary_rate))
                 .components(vec![row]),
         )
         .await?;
@@ -208,13 +216,7 @@ async fn run_pricing(
                 .edit(
                     *ctx,
                     poise::CreateReply::default()
-                        .embed(embeds::estimate_embed(
-                            parsed,
-                            &est,
-                            league,
-                            secondary_rate,
-                            None,
-                        ))
+                        .embed(embeds::estimate_embed(parsed, &est, league, secondary_rate))
                         .components(vec![]),
                 )
                 .await?;
@@ -224,13 +226,7 @@ async fn run_pricing(
                 .edit(
                     *ctx,
                     poise::CreateReply::default()
-                        .embed(embeds::estimate_embed(
-                            parsed,
-                            &est,
-                            league,
-                            secondary_rate,
-                            None,
-                        ))
+                        .embed(embeds::estimate_embed(parsed, &est, league, secondary_rate))
                         .components(vec![]),
                 )
                 .await?;
