@@ -46,11 +46,17 @@ fn median_sorted(v: &mut [f64]) -> Option<f64> {
         return None;
     }
     v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    Some(v[v.len() / 2])
+    let n = v.len();
+    if n.is_multiple_of(2) {
+        Some((v[n / 2 - 1] + v[n / 2]) / 2.0)
+    } else {
+        Some(v[n / 2])
+    }
 }
 
 /// k-NN prediction for the probe, EXCLUDING every item sharing the probe's exact mod-set
-/// (self-exclusion: `keys[i] != keys[skip]`), not just the probe itself.
+/// (`keys[i] != keys[skip]`). The key filter excludes the probe and all its mod-set siblings
+/// implicitly — no separate index-equality guard is needed.
 fn predict_one(items: &[ItemVector], keys: &[String], skip: usize, w: SimWeights) -> Option<f64> {
     let q: Vec<(String, Option<f64>)> = items[skip].mods.clone();
     let mut scored: Vec<(f64, f64)> = items
@@ -68,8 +74,9 @@ fn predict_one(items: &[ItemVector], keys: &[String], skip: usize, w: SimWeights
     Some(weighted_median(&scored))
 }
 
-/// Evenly-spaced probe indices across [0, n): `k·n/probes` (bounded by LOO_MAX_PROBES,
-/// spread across the whole corpus — see the original loo_median_error note).
+/// Evenly-spaced probe indices across [0, n): `k·n/probes`, where the count is capped at
+/// `LOO_MAX_PROBES`. The even-spacing formula avoids the cliff that a ceil-stride would
+/// create at the cap boundary (e.g. n=401 must not collapse to ~200 probes).
 fn probe_indices(n: usize) -> Vec<usize> {
     let probes = loo_probe_count(n);
     (0..probes).map(|k| k * n / probes).collect()
@@ -172,6 +179,29 @@ pub fn tune_and_calibrate(items: &[ItemVector]) -> (SimWeights, Calibration) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn median_sorted_even_length_averages_two_middle_elements() {
+        assert_eq!(
+            median_sorted(&mut [1.0, 2.0, 3.0, 4.0]),
+            Some(2.5),
+            "even-length: must average the two middle elements"
+        );
+    }
+
+    #[test]
+    fn median_sorted_odd_length_returns_middle() {
+        assert_eq!(
+            median_sorted(&mut [1.0, 2.0, 3.0]),
+            Some(2.0),
+            "odd-length: must return the single middle element"
+        );
+    }
+
+    #[test]
+    fn median_sorted_empty_returns_none() {
+        assert_eq!(median_sorted(&mut []), None);
+    }
 
     #[test]
     fn self_exclusion_drops_same_mod_set_siblings() {
