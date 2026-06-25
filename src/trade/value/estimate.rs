@@ -131,15 +131,20 @@ impl crate::trade::value::CategoryModel {
     /// membership is by mod-SET only (roll is not a price-shifter).
     pub fn range_estimate(&self, query: &[(String, Option<f64>)]) -> Option<RangeEstimate> {
         use crate::trade::value::{MIN_POOL, RELAX_JACCARD};
-        use std::collections::HashSet;
         if self.items.is_empty() || query.is_empty() {
             return None;
         }
-        let qset: HashSet<&str> = query.iter().map(|(s, _)| s.as_str()).collect();
+        // Allocation-free linear Jaccard: PoE invariant (unique mod names per item/query)
+        // means slice lengths equal set sizes, so a linear scan is exact. Items carry ≤6
+        // mods — no HashSet needed, matching the same approach used in `similarity`.
+        let q_len = query.len();
         let jaccard = |it: &super::itemvec::ItemVector| -> f64 {
-            let iset: HashSet<&str> = it.mods.iter().map(|(s, _)| s.as_str()).collect();
-            let inter = qset.iter().filter(|s| iset.contains(**s)).count();
-            let union = qset.len() + iset.len() - inter;
+            let item_len = it.mods.len();
+            let inter = query
+                .iter()
+                .filter(|(q, _)| it.mods.iter().any(|(m, _)| m == q))
+                .count();
+            let union = q_len + item_len - inter;
             if union == 0 {
                 0.0
             } else {
@@ -170,7 +175,7 @@ impl crate::trade::value::CategoryModel {
         let fair = percentile_sorted(&pool, 0.50);
         let ask = percentile_sorted(&pool, 0.80);
         if let Some(td) = self.top_decile_price {
-            if fair >= td {
+            if fair >= td || ask >= td {
                 return None; // abstain: corpus underprices the expensive tail → live
             }
         }
@@ -265,6 +270,43 @@ mod tests {
         assert!(
             m.range_estimate(&q).is_none(),
             "fair >= top decile → abstain, route to live"
+        );
+    }
+
+    #[test]
+    fn range_estimate_abstains_when_ask_reaches_top_decile() {
+        // Build a pool where p50 (fair) < top_decile but p80 (ask) >= top_decile.
+        // 12 items, prices ascending 10..120 step 10.
+        // Sorted pool: [10,20,30,40,50,60,70,80,90,100,110,120]
+        // p50 index = 0.5*11 = 5.5 → fair = 60 + 0.5*10 = 65
+        // p80 index = 0.8*11 = 8.8 → ask  = 90 + 0.8*10 = 98
+        // Set top_decile = 90 → fair(65) < td(90) <= ask(98) → must abstain.
+        let items: Vec<ItemVector> = (1..=12).map(|i| iv(&["a", "b"], i as f64 * 10.0)).collect();
+        let m = model_with(items, Some(90.0));
+        let q = vec![("a".into(), None), ("b".into(), None)];
+        // Verify preconditions hold (fair < td <= ask) via a pass-through model first.
+        let m_no_td = model_with(
+            (1..=12).map(|i| iv(&["a", "b"], i as f64 * 10.0)).collect(),
+            None,
+        );
+        let r_no_td = m_no_td
+            .range_estimate(&q)
+            .expect("no-td model should return Some");
+        assert!(
+            r_no_td.fair < 90.0,
+            "precondition: fair({}) must be < td(90)",
+            r_no_td.fair
+        );
+        assert!(
+            r_no_td.ask >= 90.0,
+            "precondition: ask({}) must be >= td(90)",
+            r_no_td.ask
+        );
+        // Now the real assertion: ask >= td must trigger abstention.
+        let result = m.range_estimate(&q);
+        assert!(
+            result.is_none(),
+            "ask >= top decile → abstain even when fair < top decile: {result:?}"
         );
     }
 

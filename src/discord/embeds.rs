@@ -134,8 +134,12 @@ pub fn range_fallback_line(
         Confidence::Low => "low",
     };
     format!(
-        "📊 **{}** — No live listings · corpus estimate **{:.0}–{:.0} div** (fair ~{:.0}) · {} confidence",
-        item_name, r.floor, r.ask, r.fair, conf
+        "📊 **{}** — No live trade price · corpus estimate **{}–{}** (fair ~{}) · {} confidence",
+        item_name,
+        div_str(r.floor),
+        div_str(r.ask),
+        div_str(r.fair),
+        conf
     )
 }
 
@@ -415,7 +419,7 @@ mod tests {
         };
         let line = super::range_fallback_line("Chiming Staff", &r);
         assert!(line.contains("Chiming Staff"), "{line}");
-        assert!(line.contains("No live listings"), "{line}");
+        assert!(line.contains("No live trade price"), "{line}");
         assert!(
             line.contains('5') && line.contains("30") && line.contains("12"),
             "floor/ask/fair: {line}"
