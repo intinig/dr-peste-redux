@@ -292,6 +292,12 @@ pub fn arb_embed(opps: &[Opportunity], league: &str) -> serenity::CreateEmbed {
     if lines.is_empty() {
         lines.push_str("Nothing above thresholds.");
     }
+    // Discord's embed description cap is 4096 chars; truncate to avoid a silent send failure.
+    const DESC_CAP: usize = 4000;
+    if lines.len() > DESC_CAP {
+        lines.truncate(DESC_CAP);
+        lines.push_str("\n… (truncated)");
+    }
     serenity::CreateEmbed::new()
         .title("⚖️ Currency arbitrage")
         .description(lines)

@@ -143,6 +143,12 @@ fn evaluate_cycle(legs: &[Leg]) -> Option<CycleResult> {
 
 /// Rotation-invariant key so the same cycle discovered from different start
 /// nodes is deduped. Uses the currency sequence rotated to its lexicographic min.
+///
+/// NOTE: this dedups by node sequence only. A future multi-edge candidate source
+/// (Phase 2 cxapi) could emit parallel edges between the same pair of nodes; two
+/// distinct cycles that share the same node order would collide here and one would
+/// be silently dropped. Phase 2 must include edge identity (e.g. offer hash) in
+/// the key before wiring in a multi-edge source.
 fn canonical_key(legs: &[Leg]) -> String {
     let seq: Vec<&str> = legs.iter().map(|l| l.from.as_str()).collect();
     let n = seq.len();

@@ -219,7 +219,6 @@ fn with_cookie(rb: reqwest::RequestBuilder, cookie: &SecretString) -> reqwest::R
 /// `pay_currency` to receive `get_amount` of `get_currency`, with the
 /// seller holding at least `stock` units available.
 #[derive(Clone, Debug, PartialEq)]
-#[allow(dead_code)] // consumed by the arb module (future task)
 pub struct ExchangeOffer {
     pub pay_currency: String,
     pub pay_amount: u32,
@@ -237,7 +236,6 @@ pub struct ExchangeOffer {
 ///
 /// This fixture is SYNTHETIC, modeled on the documented shape, pending live
 /// validation via the `#[ignore]`d `capture_exchange_fixture` test.
-#[allow(dead_code)] // called by TradeClient::exchange, which is consumed by the arb module (future task)
 fn parse_exchange(v: &Value, have: &str, want: &str) -> Vec<ExchangeOffer> {
     let mut out = Vec::new();
     let Some(results) = v.get("result").and_then(|x| x.as_array()) else {
@@ -301,8 +299,6 @@ pub struct TradeClient {
     >,
     /// Short-lived cache for exchange offers, keyed by `"exchange|<league>|<have>|<want>"`.
     /// Same 60-second TTL as `cache` — keeps repeated `/arb` calls polite.
-    #[allow(dead_code)]
-    // read by exchange_cache_get/put, which are consumed by the arb module (future task)
     exchange_cache: std::sync::Mutex<
         std::collections::HashMap<String, (std::time::Instant, Vec<ExchangeOffer>)>,
     >,
@@ -451,7 +447,6 @@ impl TradeClient {
     /// unit of `have`. Returns offers sorted best-ratio-first (most `want`
     /// per `have`). Uses the operator/anonymous session and the Exchange rate
     /// bucket. Politeness: results are cached for 60 seconds.
-    #[allow(dead_code)] // called by the arb module (future task)
     pub async fn exchange(
         &self,
         have: &str,
@@ -492,9 +487,13 @@ impl TradeClient {
         if id.is_empty() || hashes.is_empty() {
             return Ok(Vec::new());
         }
-        // Exchange fetch: same /fetch endpoint, with &exchange, capped at 10 ids.
+        // Exchange fetch: the search already sorts best-ratio-first (`sort:{have:"asc"}`),
+        // so the top offers are in the first batch. Fetch only the first ≤10 hashes
+        // rather than all batches: our only consumer (WatchlistSource::edges) uses just
+        // the top-of-book offer, so fetching further pages wastes requests on the shared
+        // Exchange rate bucket. (Relates to known fetch-batching follow-up.)
         let mut offers = Vec::new();
-        for csv in fetch_batches(&hashes) {
+        if let Some(csv) = fetch_batches(&hashes).into_iter().next() {
             let furl = format!("{TRADE_BASE}/fetch/{csv}?query={id}&exchange");
             let fv: Value = self
                 .send_with_retry(&self.default_limiter, Endpoint::Exchange, || {

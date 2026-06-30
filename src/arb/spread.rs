@@ -38,6 +38,10 @@ pub fn scan(edges: &[Edge], min_spread: f64, min_volume: f64) -> Vec<FlipResult>
         };
         let product = ab.quote.ratio() * ba.quote.ratio();
         let spread_pct = (1.0 - product).max(0.0);
+        // NOTE: stock(A→B) is denominated in B and stock(B→A) is denominated in A,
+        // so this `min` is a deliberate Phase-1 fill-likelihood PROXY, not a true
+        // tradeable quantity. Phase 2 should normalize both sides to a common
+        // currency before using this value for ranking.
         let volume = ab.quote.stock.min(ba.quote.stock) as f64;
         if spread_pct >= min_spread && volume >= min_volume {
             out.push(FlipResult {
