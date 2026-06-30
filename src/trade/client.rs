@@ -227,21 +227,23 @@ pub struct ExchangeOffer {
     pub stock: u64,
 }
 
-/// Parse a trade2 exchange `/fetch?exchange` response into offers.
+/// Parse a trade2 currency-exchange search response into offers.
 ///
-/// Field paths follow the documented contract:
-/// `result[].listing.offers[].exchange.amount` — what the seller wants (our pay).
-/// `result[].listing.offers[].item.amount`     — what the seller gives (our get).
-/// `result[].listing.offers[].item.stock`      — units the seller has in stock.
+/// The exchange endpoint embeds the listings INLINE in the search response:
+/// `result` is an object keyed by listing hash (NOT the array of hash strings
+/// the item-search endpoint returns — and there is no separate `/fetch` step).
+/// Within each listing:
+/// `listing.offers[].exchange.amount` — what the seller wants (our pay).
+/// `listing.offers[].item.amount`     — what the seller gives (our get).
+/// `listing.offers[].item.stock`      — units the seller has in stock.
 ///
-/// This fixture is SYNTHETIC, modeled on the documented shape, pending live
-/// validation via the `#[ignore]`d `capture_exchange_fixture` test.
+/// Shape validated against a live capture of the PoE2 `/exchange` endpoint.
 fn parse_exchange(v: &Value, have: &str, want: &str) -> Vec<ExchangeOffer> {
     let mut out = Vec::new();
-    let Some(results) = v.get("result").and_then(|x| x.as_array()) else {
+    let Some(listings) = v.get("result").and_then(|x| x.as_object()) else {
         return out;
     };
-    for r in results {
+    for r in listings.values() {
         let Some(offers) = r.pointer("/listing/offers").and_then(|x| x.as_array()) else {
             continue;
         };
@@ -480,41 +482,10 @@ impl TradeClient {
             .await
             .context("trade2 exchange search failed")?;
         let v: Value = resp.json().await?;
-        let id = v
-            .get("id")
-            .and_then(|x| x.as_str())
-            .unwrap_or_default()
-            .to_string();
-        let hashes: Vec<String> = v
-            .get("result")
-            .and_then(|x| x.as_array())
-            .map(|a| {
-                a.iter()
-                    .filter_map(|h| h.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
-        if id.is_empty() || hashes.is_empty() {
-            return Ok(Vec::new());
-        }
-        // Exchange fetch: the exchange endpoint returns offers ordered best-ratio-first,
-        // so the top offers are in the first batch. Fetch only the first ≤10 hashes
-        // rather than all batches: our only consumer (WatchlistSource::edges) uses just
-        // the top-of-book offer, so fetching further pages wastes requests on the shared
-        // Exchange rate bucket. (Relates to known fetch-batching follow-up.)
-        let mut offers = Vec::new();
-        if let Some(csv) = fetch_batches(&hashes).into_iter().next() {
-            let furl = format!("{TRADE_BASE}/fetch/{csv}?query={id}&exchange");
-            let fv: Value = self
-                .send_with_retry(&self.default_limiter, Endpoint::Exchange, || {
-                    self.http.get(&furl)
-                })
-                .await
-                .context("trade2 exchange fetch failed")?
-                .json()
-                .await?;
-            offers.extend(parse_exchange(&fv, have, want));
-        }
+        // The exchange endpoint embeds the listings INLINE in the search
+        // response (`result` is a hash->listing map), so parse the offers
+        // directly — there is no separate `/fetch` step for the exchange.
+        let mut offers = parse_exchange(&v, have, want);
         // Best ratio first (most `want` per `have`).
         offers.sort_by(|a, b| {
             let ra = a.get_amount as f64 / a.pay_amount.max(1) as f64;
@@ -1100,97 +1071,6 @@ mod tests {
         let offers = client.exchange("exalted", "divine", &league).await.unwrap();
         println!("offers: {offers:#?}");
         assert!(!offers.is_empty(), "expected at least one offer");
-    }
-
-    /// Diagnostic (network): A/B-tests candidate exchange request shapes and
-    /// dumps the raw search + fetch responses, so we can see which boundary
-    /// fails (request shape vs. response parse). Run with:
-    ///   POESESSID=... ARB_TEST_LEAGUE="Runes of Aldur" \
-    ///     cargo test debug_exchange_shapes -- --ignored --nocapture
-    #[tokio::test]
-    #[ignore = "network: diagnoses the live exchange request shape"]
-    async fn debug_exchange_shapes() {
-        let league = std::env::var("ARB_TEST_LEAGUE").unwrap_or_else(|_| "Standard".into());
-        let cookie = std::env::var("POESESSID").ok();
-        let client = reqwest::Client::builder()
-            .user_agent(USER_AGENT)
-            .build()
-            .unwrap();
-        let url = format!("{TRADE_BASE}/exchange/{league}");
-        println!("POST {url}  (cookie: {})\n", if cookie.is_some() { "set" } else { "none" });
-
-        let shapes = [
-            (
-                "A: exchange-wrapper + engine:new",
-                serde_json::json!({
-                    "exchange": { "status": { "option": "online" }, "have": ["exalted"], "want": ["divine"] },
-                    "engine": "new"
-                }),
-            ),
-            (
-                "B: exchange-wrapper, no engine",
-                serde_json::json!({
-                    "exchange": { "status": { "option": "online" }, "have": ["exalted"], "want": ["divine"] }
-                }),
-            ),
-            (
-                "C: query+sort (old shape)",
-                serde_json::json!({
-                    "query": { "status": { "option": "online" }, "have": ["exalted"], "want": ["divine"] },
-                    "sort": { "have": "asc" },
-                    "engine": "new"
-                }),
-            ),
-        ];
-
-        for (name, body) in shapes {
-            let mut rb = client.post(&url).json(&body);
-            if let Some(c) = &cookie {
-                rb = rb.header("Cookie", format!("POESESSID={c}"));
-            }
-            let (status, text) = match rb.send().await {
-                Ok(r) => {
-                    let s = r.status().to_string();
-                    (s, r.text().await.unwrap_or_default())
-                }
-                Err(e) => ("send-error".to_string(), e.to_string()),
-            };
-            let head: String = text.chars().take(500).collect();
-            println!("### {name}\n  status: {status}\n  body[..500]: {head}");
-
-            // If this shape returned an id + result hashes, fetch the first and
-            // dump the raw item JSON so we can verify parse_exchange's pointers.
-            if let Ok(v) = serde_json::from_str::<Value>(&text) {
-                let id = v.get("id").and_then(|x| x.as_str()).unwrap_or_default();
-                let count = v
-                    .get("result")
-                    .and_then(|x| x.as_array())
-                    .map(|a| a.len())
-                    .unwrap_or(0);
-                let first = v
-                    .get("result")
-                    .and_then(|x| x.as_array())
-                    .and_then(|a| a.first())
-                    .and_then(|h| h.as_str());
-                println!("  parsed: id={id:?} result_count={count}");
-                if !id.is_empty() {
-                    if let Some(h) = first {
-                        let furl = format!("{TRADE_BASE}/fetch/{h}?query={id}&exchange");
-                        let mut fb = client.get(&furl);
-                        if let Some(c) = &cookie {
-                            fb = fb.header("Cookie", format!("POESESSID={c}"));
-                        }
-                        let ftext = match fb.send().await {
-                            Ok(r) => r.text().await.unwrap_or_default(),
-                            Err(e) => format!("fetch-error: {e}"),
-                        };
-                        let fhead: String = ftext.chars().take(1500).collect();
-                        println!("  FETCH {furl}\n  fetch body[..1500]: {fhead}");
-                    }
-                }
-            }
-            println!();
-        }
     }
 
     #[tokio::test]
