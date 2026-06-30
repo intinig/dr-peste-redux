@@ -227,6 +227,21 @@ pub struct ExchangeOffer {
     pub stock: u64,
 }
 
+/// Error unless the exchange search response carries a `result` object.
+///
+/// A missing or non-object `result` signals a malformed/error response (rate
+/// limit, error envelope, or a shape change), which we surface rather than
+/// silently returning zero offers — the exact silent-failure class this code
+/// path is meant to avoid. A genuinely empty market is `result: {}`, still an
+/// object, so it passes here and parses to zero offers without erroring.
+fn require_result_object(v: &Value) -> Result<()> {
+    if v.get("result").is_some_and(|x| x.is_object()) {
+        Ok(())
+    } else {
+        anyhow::bail!("trade2 exchange response missing 'result' object");
+    }
+}
+
 /// Parse a trade2 currency-exchange search response into offers.
 ///
 /// The exchange endpoint embeds the listings INLINE in the search response:
@@ -482,6 +497,9 @@ impl TradeClient {
             .await
             .context("trade2 exchange search failed")?;
         let v: Value = resp.json().await?;
+        // Surface malformed/error responses instead of silently returning no
+        // offers (an empty market is still a `result: {}` object, so it passes).
+        require_result_object(&v)?;
         // The exchange endpoint embeds the listings INLINE in the search
         // response (`result` is a hash->listing map), so parse the offers
         // directly — there is no separate `/fetch` step for the exchange.
@@ -1054,6 +1072,18 @@ mod tests {
         assert!(offers
             .iter()
             .all(|o| o.pay_currency == "exalted" && o.get_currency == "divine"));
+    }
+
+    #[test]
+    fn require_result_object_distinguishes_empty_from_malformed() {
+        use serde_json::json;
+        // Empty market: `result` is an (empty) object → OK, parses to 0 offers.
+        assert!(require_result_object(&json!({"result": {}})).is_ok());
+        assert!(require_result_object(&json!({"result": {"h": {}}})).is_ok());
+        // Malformed/error responses → error, not a silent empty result.
+        assert!(require_result_object(&json!({"error": "rate limited"})).is_err());
+        assert!(require_result_object(&json!({"result": []})).is_err()); // item-search shape
+        assert!(require_result_object(&json!({"result": "x"})).is_err());
     }
 
     /// Operator test (network): captures a live trade2 exchange fixture.
