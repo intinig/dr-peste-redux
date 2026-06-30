@@ -1,0 +1,36 @@
+{
+  "result": [
+    {
+      "id": "hash1",
+      "listing": {
+        "indexed": "2026-06-29T12:00:00Z",
+        "account": { "name": "AccountOne" },
+        "offers": [
+          { "exchange": { "currency": "exalted", "amount": 240 },
+            "item": { "currency": "divine", "amount": 1, "stock": 8 } }
+        ]
+      }
+    },
+    {
+      "id": "hash2",
+      "listing": {
+        "indexed": "2026-06-29T12:05:00Z",
+        "account": { "name": "AccountTwo" },
+        "offers": [
+          { "exchange": { "currency": "exalted", "amount": 255 },
+            "item": { "currency": "divine", "amount": 1, "stock": 15 } }
+        ]
+      }
+    },
+    {
+      "id": "hash3",
+      "listing": {
+        "account": { "name": "AccountThree" },
+        "offers": [
+          { "exchange": { "currency": "exalted", "amount": 500 },
+            "item": { "currency": "divine", "amount": 2, "stock": 6 } }
+        ]
+      }
+    }
+  ]
+}
