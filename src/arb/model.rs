@@ -1,5 +1,8 @@
 //! Core value types for the currency-arbitrage engine. Pure, no I/O.
 
+use crate::arb::graph::CycleResult;
+use crate::arb::spread::FlipResult;
+
 /// A trade2 currency-exchange id (e.g. "divine", "exalted").
 pub type Currency = String;
 
@@ -44,6 +47,45 @@ pub struct Leg {
     pub quote: RatioQuote,
 }
 
+#[derive(Clone, Debug)]
+pub enum Opportunity {
+    Triangulation { legs: Vec<Leg>, multiplier: f64, feasible_volume: f64, confidence: Freshness },
+    Flip { market: (Currency, Currency), spread_pct: f64, volume: f64, confidence: Freshness },
+}
+
+impl Opportunity {
+    pub fn from_cycle(c: CycleResult, confidence: Freshness) -> Opportunity {
+        Opportunity::Triangulation {
+            legs: c.legs,
+            multiplier: c.multiplier,
+            feasible_volume: c.feasible_volume,
+            confidence,
+        }
+    }
+    pub fn from_flip(f: FlipResult, confidence: Freshness) -> Opportunity {
+        Opportunity::Flip {
+            market: f.market,
+            spread_pct: f.spread_pct,
+            volume: f.volume,
+            confidence,
+        }
+    }
+    pub fn score(&self) -> f64 {
+        match self {
+            Opportunity::Triangulation { multiplier, feasible_volume, .. } => {
+                (multiplier - 1.0) * feasible_volume
+            }
+            Opportunity::Flip { spread_pct, volume, .. } => spread_pct * volume,
+        }
+    }
+    pub fn confidence(&self) -> Freshness {
+        match self {
+            Opportunity::Triangulation { confidence, .. } => *confidence,
+            Opportunity::Flip { confidence, .. } => *confidence,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -52,5 +94,12 @@ mod tests {
     fn ratio_is_get_over_pay() {
         let q = RatioQuote { pay: 2, get: 5, stock: 100, freshness: Freshness::Live };
         assert!((q.ratio() - 2.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn triangulation_score_is_profit_times_volume() {
+        let c = crate::arb::graph::CycleResult { legs: vec![], multiplier: 1.2, feasible_volume: 50.0 };
+        let opp = Opportunity::from_cycle(c, Freshness::Live);
+        assert!((opp.score() - 10.0).abs() < 1e-9); // 0.2 * 50
     }
 }
