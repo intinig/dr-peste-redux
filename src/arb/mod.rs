@@ -14,6 +14,11 @@ pub struct ArbConfig {
     pub max_cycle_len: usize,
     pub min_profit_pct: f64,
     pub min_spread_pct: f64,
+    /// Plausibility caps: a cycle above `max_profit_pct` or a flip above
+    /// `max_spread_pct` is almost certainly a stale/one-sided thin book, not real
+    /// arbitrage, so it is dropped rather than surfaced.
+    pub max_profit_pct: f64,
+    pub max_spread_pct: f64,
     pub min_volume: f64,
     pub top_n: usize,
 }
@@ -36,12 +41,21 @@ impl ArbEngine {
 
         let mut opps: Vec<Opportunity> = Vec::new();
         for c in cycles {
-            if c.feasible_volume >= self.cfg.min_volume {
+            // Require real throughput AND a plausible profit: a cycle above the
+            // cap is a stale/erroneous thin-book quote (e.g. a fat-fingered
+            // listing), not executable arbitrage.
+            if c.feasible_volume >= self.cfg.min_volume
+                && (c.multiplier - 1.0) <= self.cfg.max_profit_pct
+            {
                 opps.push(Opportunity::from_cycle(c, Freshness::Live));
             }
         }
         for f in flips {
-            opps.push(Opportunity::from_flip(f, Freshness::Live));
+            // Drop implausibly wide spreads — one-sided/stale books, not a real
+            // maker opportunity.
+            if f.spread_pct <= self.cfg.max_spread_pct {
+                opps.push(Opportunity::from_flip(f, Freshness::Live));
+            }
         }
         opps.sort_by(|a, b| b.score().partial_cmp(&a.score()).unwrap_or(Ordering::Equal));
         opps.truncate(self.cfg.top_n);
@@ -91,6 +105,8 @@ mod engine_tests {
                 max_cycle_len: 4,
                 min_profit_pct: 0.0,
                 min_spread_pct: 0.5,
+                max_profit_pct: 1.0,
+                max_spread_pct: 1.0,
                 min_volume: 0.0,
                 top_n: 10,
             },
@@ -108,10 +124,53 @@ mod engine_tests {
                 max_cycle_len: 4,
                 min_profit_pct: 0.5,
                 min_spread_pct: 0.5,
+                max_profit_pct: 1.0,
+                max_spread_pct: 1.0,
                 min_volume: 0.0,
                 top_n: 10,
             },
         );
         assert!(eng.opportunities("X").await.unwrap().is_empty());
+    }
+
+    fn cfg(max_profit_pct: f64, max_spread_pct: f64) -> ArbConfig {
+        ArbConfig {
+            max_cycle_len: 4,
+            min_profit_pct: 0.0,
+            min_spread_pct: 0.01,
+            max_profit_pct,
+            max_spread_pct,
+            min_volume: 0.0,
+            top_n: 10,
+        }
+    }
+
+    #[tokio::test]
+    async fn cap_drops_implausible_cycle() {
+        // ×1000 cycle (stale/fat-fingered book) must be dropped by max_profit_pct.
+        let edges = vec![
+            e("A", "B", 1, 10, 1000),
+            e("B", "C", 1, 10, 1000),
+            e("C", "A", 1, 10, 1000),
+        ];
+        let eng = ArbEngine::new(Arc::new(Fixed(edges)), cfg(0.5, 0.5));
+        assert!(eng.opportunities("X").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn cap_drops_wide_flip() {
+        // 50% spread exceeds max_spread_pct (0.25) → dropped.
+        let edges = vec![e("A", "B", 2, 1, 500), e("B", "A", 1, 1, 500)];
+        let eng = ArbEngine::new(Arc::new(Fixed(edges)), cfg(0.5, 0.25));
+        assert!(eng.opportunities("X").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn keeps_plausible_flip() {
+        // 10% spread, within caps → surfaced as a Flip.
+        let edges = vec![e("A", "B", 10, 9, 500), e("B", "A", 1, 1, 500)];
+        let eng = ArbEngine::new(Arc::new(Fixed(edges)), cfg(0.5, 0.25));
+        let opps = eng.opportunities("X").await.unwrap();
+        assert!(opps.iter().any(|o| matches!(o, Opportunity::Flip { .. })));
     }
 }

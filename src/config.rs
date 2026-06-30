@@ -13,6 +13,8 @@ pub struct Config {
     pub arb_watchlist: Vec<String>,
     pub arb_min_profit_pct: f64,
     pub arb_min_spread_pct: f64,
+    pub arb_max_profit_pct: f64,
+    pub arb_max_spread_pct: f64,
     pub arb_min_volume: f64,
     pub arb_max_cycle_len: usize,
     pub arb_top_n: usize,
@@ -104,11 +106,25 @@ impl Config {
                 .context("ARB_MIN_SPREAD_PCT must be a number")?,
             None => 0.03,
         };
+        let arb_max_profit_pct = match get("ARB_MAX_PROFIT_PCT") {
+            Some(v) => v
+                .parse::<f64>()
+                .context("ARB_MAX_PROFIT_PCT must be a number")?,
+            None => 0.5,
+        };
+        let arb_max_spread_pct = match get("ARB_MAX_SPREAD_PCT") {
+            Some(v) => v
+                .parse::<f64>()
+                .context("ARB_MAX_SPREAD_PCT must be a number")?,
+            None => 0.25,
+        };
+        // Liquidity floor: 0 would let ~zero-volume thin/stale books through (and,
+        // since the score weights by volume, let absurd-ratio noise rank to the top).
         let arb_min_volume = match get("ARB_MIN_VOLUME") {
             Some(v) => v
                 .parse::<f64>()
                 .context("ARB_MIN_VOLUME must be a number")?,
-            None => 0.0,
+            None => 1.0,
         };
         let arb_max_cycle_len = match get("ARB_MAX_CYCLE_LEN") {
             Some(v) => v
@@ -135,6 +151,8 @@ impl Config {
             arb_watchlist,
             arb_min_profit_pct,
             arb_min_spread_pct,
+            arb_max_profit_pct,
+            arb_max_spread_pct,
             arb_min_volume,
             arb_max_cycle_len,
             arb_top_n,
@@ -152,6 +170,8 @@ impl std::fmt::Debug for Config {
             .field("arb_watchlist", &self.arb_watchlist)
             .field("arb_min_profit_pct", &self.arb_min_profit_pct)
             .field("arb_min_spread_pct", &self.arb_min_spread_pct)
+            .field("arb_max_profit_pct", &self.arb_max_profit_pct)
+            .field("arb_max_spread_pct", &self.arb_max_spread_pct)
             .field("arb_min_volume", &self.arb_min_volume)
             .field("arb_max_cycle_len", &self.arb_max_cycle_len)
             .field("arb_top_n", &self.arb_top_n)
@@ -316,6 +336,10 @@ mod tests {
             vec!["divine", "exalted", "chaos", "annul", "regal", "vaal"]
         );
         assert!((cfg.arb_min_profit_pct - 0.03).abs() < 1e-9);
+        assert!((cfg.arb_max_profit_pct - 0.5).abs() < 1e-9);
+        assert!((cfg.arb_max_spread_pct - 0.25).abs() < 1e-9);
+        // Liquidity floor must default > 0 so thin/stale books are filtered.
+        assert!((cfg.arb_min_volume - 1.0).abs() < 1e-9);
     }
 
     #[test]

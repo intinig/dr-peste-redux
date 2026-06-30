@@ -157,6 +157,8 @@ async fn main() -> Result<()> {
             max_cycle_len: config.arb_max_cycle_len,
             min_profit_pct: config.arb_min_profit_pct,
             min_spread_pct: config.arb_min_spread_pct,
+            max_profit_pct: config.arb_max_profit_pct,
+            max_spread_pct: config.arb_max_spread_pct,
             min_volume: config.arb_min_volume,
             top_n: config.arb_top_n,
         },

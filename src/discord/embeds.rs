@@ -250,6 +250,48 @@ pub fn breakdown_embed(
         )))
 }
 
+/// Concrete buy/sell line for a flip market, priced in the cheaper currency so
+/// the numbers are human-sized (e.g. "1 divine: buy ~250 chaos / sell ~230 chaos").
+/// `ab` = a→b (pay a, get b); `ba` = b→a (pay b, get a). "buy 1 X" = what you pay
+/// taking the best offer; "sell" = what you receive — the gap is the maker spread.
+fn flip_display(
+    a: &str,
+    b: &str,
+    ab: &crate::arb::model::RatioQuote,
+    ba: &crate::arb::model::RatioQuote,
+) -> String {
+    let a_per_b_buy = ab.pay as f64 / ab.get as f64; // a paid to buy 1 b
+    if a_per_b_buy >= 1.0 {
+        // b is the more valuable side — price 1 b in units of a.
+        let a_per_b_sell = ba.get as f64 / ba.pay as f64; // a received selling 1 b
+        format!(
+            "1 {b}: buy ~{} {a} / sell ~{} {a}",
+            fmt_amt(a_per_b_buy),
+            fmt_amt(a_per_b_sell)
+        )
+    } else {
+        let b_per_a_buy = ba.pay as f64 / ba.get as f64; // b paid to buy 1 a
+        let b_per_a_sell = ab.get as f64 / ab.pay as f64; // b received selling 1 a
+        format!(
+            "1 {a}: buy ~{} {b} / sell ~{} {b}",
+            fmt_amt(b_per_a_buy),
+            fmt_amt(b_per_a_sell)
+        )
+    }
+}
+
+/// Format a currency ratio for display: more precision for small numbers,
+/// rounded for large ones (e.g. 250.0 → "250", 2.5 → "2.50").
+fn fmt_amt(x: f64) -> String {
+    if x >= 100.0 {
+        format!("{x:.0}")
+    } else if x >= 10.0 {
+        format!("{x:.1}")
+    } else {
+        format!("{x:.2}")
+    }
+}
+
 /// Truncate `s` in place to at most `cap` bytes, backing off to the nearest
 /// UTF-8 char boundary so a multi-byte char (e.g. `→`) is never split — which
 /// would panic in `String::truncate`.
@@ -290,13 +332,15 @@ pub fn arb_embed(opps: &[Opportunity], league: &str) -> serenity::CreateEmbed {
                 market,
                 spread_pct,
                 volume,
+                ab,
+                ba,
                 ..
             } => {
+                let (a, b) = (market.0.as_str(), market.1.as_str());
+                let body = flip_display(a, b, ab, ba);
                 lines.push_str(&format!(
-                    "**{}. Flip** `{} / {}`  {:.1}% spread  (~{:.0} vol)\n",
+                    "**{}. Flip** `{a}/{b}` — {body}  ({:.1}% spread, ~{:.0} vol)\n",
                     i + 1,
-                    market.0,
-                    market.1,
                     spread_pct * 100.0,
                     volume
                 ));
@@ -338,6 +382,26 @@ mod tests {
         let mut t = "ab".to_string();
         truncate_on_char_boundary(&mut t, 100);
         assert_eq!(t, "ab");
+    }
+
+    #[test]
+    fn flip_display_prices_in_the_cheaper_currency() {
+        use crate::arb::model::{Freshness, RatioQuote};
+        let q = |pay: u32, get: u32| RatioQuote {
+            pay,
+            get,
+            stock: 100,
+            freshness: Freshness::Live,
+        };
+        // chaos/divine: 250 chaos buys 1 divine; selling 1 divine yields 230 chaos.
+        // divine is the valuable side → price 1 divine in chaos.
+        let s = flip_display("chaos", "divine", &q(250, 1), &q(1, 230));
+        assert_eq!(s, "1 divine: buy ~250 chaos / sell ~230 chaos");
+
+        // divine/exalted: 1 divine ≈ 250 exalted → divine is valuable, priced in exalted.
+        // ab = divine->exalted (pay 1 div, get 250 ex); ba = exalted->divine (pay 260 ex, get 1 div).
+        let s2 = flip_display("divine", "exalted", &q(1, 250), &q(260, 1));
+        assert_eq!(s2, "1 divine: buy ~260 exalted / sell ~250 exalted");
     }
 
     fn item(divine: f64, exalted: f64, chaos: f64) -> PricedItem {
