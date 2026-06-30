@@ -2,7 +2,7 @@
 //! For market {A,B}, taking both directions returns ratio(A->B)*ratio(B->A) < 1;
 //! the deficit (1 - product) is the spread a maker can earn. Pure, no I/O.
 
-use crate::arb::model::{Currency, Edge};
+use crate::arb::model::{Currency, Edge, RatioQuote};
 use std::collections::HashMap;
 
 #[derive(Clone, Debug)]
@@ -10,6 +10,11 @@ pub struct FlipResult {
     pub market: (Currency, Currency),
     pub spread_pct: f64,
     pub volume: f64,
+    /// Executable top-of-book quotes for each direction of the market, so the
+    /// display can show concrete buy/sell ratios. `ab` is `market.0 -> market.1`,
+    /// `ba` is `market.1 -> market.0`.
+    pub ab: RatioQuote,
+    pub ba: RatioQuote,
 }
 
 pub fn scan(edges: &[Edge], min_spread: f64, min_volume: f64) -> Vec<FlipResult> {
@@ -48,6 +53,8 @@ pub fn scan(edges: &[Edge], min_spread: f64, min_volume: f64) -> Vec<FlipResult>
                 market: (a, b),
                 spread_pct,
                 volume,
+                ab: ab.quote.clone(),
+                ba: ba.quote.clone(),
             });
         }
     }

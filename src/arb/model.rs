@@ -62,6 +62,9 @@ pub enum Opportunity {
         market: (Currency, Currency),
         spread_pct: f64,
         volume: f64,
+        /// Executable quotes per direction (`ab` = market.0→market.1), for display.
+        ab: RatioQuote,
+        ba: RatioQuote,
         #[allow(dead_code)] // Phase 2: read by the Phase 2 confirm stage
         confidence: Freshness,
     },
@@ -81,6 +84,8 @@ impl Opportunity {
             market: f.market,
             spread_pct: f.spread_pct,
             volume: f.volume,
+            ab: f.ab,
+            ba: f.ba,
             confidence,
         }
     }
