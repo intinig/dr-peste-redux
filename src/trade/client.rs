@@ -248,14 +248,22 @@ fn parse_exchange(v: &Value, have: &str, want: &str) -> Vec<ExchangeOffer> {
         for o in offers {
             // `exchange` = what the seller wants from us (our `have`/pay).
             // `item`     = what the seller gives (our `want`/get), with stock.
-            let pay_amount = o
+            // Use `try_from` (not `as u32`): an out-of-range amount skips the
+            // offer instead of silently wrapping and corrupting the ratio.
+            let Some(pay_amount) = o
                 .pointer("/exchange/amount")
                 .and_then(|x| x.as_u64())
-                .unwrap_or(0) as u32;
-            let get_amount = o
+                .and_then(|n| u32::try_from(n).ok())
+            else {
+                continue;
+            };
+            let Some(get_amount) = o
                 .pointer("/item/amount")
                 .and_then(|x| x.as_u64())
-                .unwrap_or(0) as u32;
+                .and_then(|n| u32::try_from(n).ok())
+            else {
+                continue;
+            };
             let stock = o
                 .pointer("/item/stock")
                 .and_then(|x| x.as_u64())
@@ -458,9 +466,11 @@ impl TradeClient {
             return Ok(hit);
         }
         let url = format!("{TRADE_BASE}/exchange/{league}");
+        // The trade2 currency-exchange endpoint takes the query under a top-level
+        // `exchange` object (NOT the item-search `query`/`sort` shape, which it
+        // rejects). PoE2 requires `engine: "new"`.
         let payload = serde_json::json!({
-            "query": { "status": { "option": "online" }, "have": [have], "want": [want] },
-            "sort": { "have": "asc" },
+            "exchange": { "status": { "option": "online" }, "have": [have], "want": [want] },
             "engine": "new"
         });
         let resp = self
@@ -487,7 +497,7 @@ impl TradeClient {
         if id.is_empty() || hashes.is_empty() {
             return Ok(Vec::new());
         }
-        // Exchange fetch: the search already sorts best-ratio-first (`sort:{have:"asc"}`),
+        // Exchange fetch: the exchange endpoint returns offers ordered best-ratio-first,
         // so the top offers are in the first batch. Fetch only the first ≤10 hashes
         // rather than all batches: our only consumer (WatchlistSource::edges) uses just
         // the top-of-book offer, so fetching further pages wastes requests on the shared
