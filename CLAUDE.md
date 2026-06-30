@@ -20,6 +20,9 @@ Read it before making architectural changes.
   pricing); other items use the poe.ninja snapshot.
 - `/help` — lists the available commands (ephemeral embed).
 - `/farm [category] [sort:value|trending]` — most valuable / biggest movers.
+- `/arb` — finds and ranks currency flip (maker-spread) and triangulation
+  (cross-rate cycle) opportunities from live trade2 exchange data. Read-only:
+  it surfaces opportunities for manual in-game execution; it never trades.
 
 ## Architecture
 
@@ -43,6 +46,7 @@ src/
   poeninja/          mod.rs  categories.rs  model.rs
   store.rs
   discord/           mod.rs  price.rs  paste.rs  help.rs  farm.rs  embeds.rs
+  arb/               mod.rs (ArbEngine) model.rs graph.rs spread.rs source.rs
 ```
 
 ## poe.ninja API notes (load-bearing details)
