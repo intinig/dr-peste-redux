@@ -1,5 +1,6 @@
 use poise::serenity_prelude as serenity;
 
+use crate::arb::model::Opportunity;
 use crate::itemtext::ParsedItem;
 use crate::poeninja::model::PricedItem;
 use crate::poeninja::League;
@@ -249,11 +250,95 @@ pub fn breakdown_embed(
         )))
 }
 
+/// Truncate `s` in place to at most `cap` bytes, backing off to the nearest
+/// UTF-8 char boundary so a multi-byte char (e.g. `→`) is never split — which
+/// would panic in `String::truncate`.
+fn truncate_on_char_boundary(s: &mut String, cap: usize) {
+    if s.len() <= cap {
+        return;
+    }
+    let mut limit = cap;
+    while limit > 0 && !s.is_char_boundary(limit) {
+        limit -= 1;
+    }
+    s.truncate(limit);
+}
+
+pub fn arb_embed(opps: &[Opportunity], league: &str) -> serenity::CreateEmbed {
+    let mut lines = String::new();
+    for (i, o) in opps.iter().enumerate() {
+        match o {
+            Opportunity::Triangulation {
+                legs,
+                multiplier,
+                feasible_volume,
+                ..
+            } => {
+                let path = std::iter::once(legs[0].from.as_str())
+                    .chain(legs.iter().map(|l| l.to.as_str()))
+                    .collect::<Vec<_>>()
+                    .join(" → ");
+                lines.push_str(&format!(
+                    "**{}. Cycle** `{}`  +{:.1}%  (~{:.0} vol)\n",
+                    i + 1,
+                    path,
+                    (multiplier - 1.0) * 100.0,
+                    feasible_volume
+                ));
+            }
+            Opportunity::Flip {
+                market,
+                spread_pct,
+                volume,
+                ..
+            } => {
+                lines.push_str(&format!(
+                    "**{}. Flip** `{} / {}`  {:.1}% spread  (~{:.0} vol)\n",
+                    i + 1,
+                    market.0,
+                    market.1,
+                    spread_pct * 100.0,
+                    volume
+                ));
+            }
+        }
+    }
+    if lines.is_empty() {
+        lines.push_str("Nothing above thresholds.");
+    }
+    // Discord's embed description cap is 4096 chars; truncate to avoid a silent send failure.
+    const DESC_CAP: usize = 4000;
+    if lines.len() > DESC_CAP {
+        truncate_on_char_boundary(&mut lines, DESC_CAP);
+        lines.push_str("\n… (truncated)");
+    }
+    serenity::CreateEmbed::new()
+        .title("⚖️ Currency arbitrage")
+        .description(lines)
+        .footer(serenity::CreateEmbedFooter::new(format!(
+            "{league} • execute manually in-game; ratios move fast"
+        )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::itemtext::parse;
     use crate::trade::model::{Confidence, Currency, EstimateBasis, PriceEstimate};
+
+    #[test]
+    fn truncate_on_char_boundary_never_splits_multibyte() {
+        // A cap landing inside the 3-byte '→' must back off to a valid boundary,
+        // never panic (which `String::truncate` would on a non-boundary index).
+        let mut s = "a→bbbbb".to_string(); // 'a'(1) + '→'(3) + 5 = 9 bytes
+        truncate_on_char_boundary(&mut s, 2); // byte 2 is inside '→' (occupies 1..4)
+        assert!(s.is_char_boundary(s.len()));
+        assert_eq!(s, "a");
+        // cap >= len is a no-op.
+        let mut t = "ab".to_string();
+        truncate_on_char_boundary(&mut t, 100);
+        assert_eq!(t, "ab");
+    }
 
     fn item(divine: f64, exalted: f64, chaos: f64) -> PricedItem {
         PricedItem {

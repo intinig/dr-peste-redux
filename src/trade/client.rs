@@ -215,6 +215,74 @@ fn with_cookie(rb: reqwest::RequestBuilder, cookie: &SecretString) -> reqwest::R
     }
 }
 
+/// One offer from the trade2 currency exchange: pay `pay_amount` of
+/// `pay_currency` to receive `get_amount` of `get_currency`, with the
+/// seller holding at least `stock` units available.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExchangeOffer {
+    pub pay_currency: String,
+    pub pay_amount: u32,
+    pub get_currency: String,
+    pub get_amount: u32,
+    pub stock: u64,
+}
+
+/// Parse a trade2 exchange `/fetch?exchange` response into offers.
+///
+/// Field paths follow the documented contract:
+/// `result[].listing.offers[].exchange.amount` — what the seller wants (our pay).
+/// `result[].listing.offers[].item.amount`     — what the seller gives (our get).
+/// `result[].listing.offers[].item.stock`      — units the seller has in stock.
+///
+/// This fixture is SYNTHETIC, modeled on the documented shape, pending live
+/// validation via the `#[ignore]`d `capture_exchange_fixture` test.
+fn parse_exchange(v: &Value, have: &str, want: &str) -> Vec<ExchangeOffer> {
+    let mut out = Vec::new();
+    let Some(results) = v.get("result").and_then(|x| x.as_array()) else {
+        return out;
+    };
+    for r in results {
+        let Some(offers) = r.pointer("/listing/offers").and_then(|x| x.as_array()) else {
+            continue;
+        };
+        for o in offers {
+            // `exchange` = what the seller wants from us (our `have`/pay).
+            // `item`     = what the seller gives (our `want`/get), with stock.
+            // Use `try_from` (not `as u32`): an out-of-range amount skips the
+            // offer instead of silently wrapping and corrupting the ratio.
+            let Some(pay_amount) = o
+                .pointer("/exchange/amount")
+                .and_then(|x| x.as_u64())
+                .and_then(|n| u32::try_from(n).ok())
+            else {
+                continue;
+            };
+            let Some(get_amount) = o
+                .pointer("/item/amount")
+                .and_then(|x| x.as_u64())
+                .and_then(|n| u32::try_from(n).ok())
+            else {
+                continue;
+            };
+            let stock = o
+                .pointer("/item/stock")
+                .and_then(|x| x.as_u64())
+                .unwrap_or(0);
+            if pay_amount == 0 || get_amount == 0 {
+                continue;
+            }
+            out.push(ExchangeOffer {
+                pay_currency: have.to_string(),
+                pay_amount,
+                get_currency: want.to_string(),
+                get_amount,
+                stock,
+            });
+        }
+    }
+    out
+}
+
 #[async_trait]
 pub trait TradeApi {
     async fn search(&self, query: &TradeQuery, session: &TradeSession) -> Result<SearchResponse>;
@@ -237,6 +305,11 @@ pub struct TradeClient {
     cache: std::sync::Mutex<
         std::collections::HashMap<String, (std::time::Instant, Vec<crate::trade::model::Listing>)>,
     >,
+    /// Short-lived cache for exchange offers, keyed by `"exchange|<league>|<have>|<want>"`.
+    /// Same 60-second TTL as `cache` — keeps repeated `/arb` calls polite.
+    exchange_cache: std::sync::Mutex<
+        std::collections::HashMap<String, (std::time::Instant, Vec<ExchangeOffer>)>,
+    >,
 }
 
 impl TradeClient {
@@ -256,6 +329,7 @@ impl TradeClient {
             rates,
             default_limiter: Arc::new(RateLimiter::new()),
             cache: std::sync::Mutex::new(std::collections::HashMap::new()),
+            exchange_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         })
     }
 
@@ -375,6 +449,107 @@ impl TradeClient {
             }
             return Ok(resp.error_for_status()?);
         }
+    }
+
+    /// Query the trade2 currency exchange: how much `want` you receive per
+    /// unit of `have`. Returns offers sorted best-ratio-first (most `want`
+    /// per `have`). Uses the operator/anonymous session and the Exchange rate
+    /// bucket. Politeness: results are cached for 60 seconds.
+    pub async fn exchange(
+        &self,
+        have: &str,
+        want: &str,
+        league: &str,
+    ) -> Result<Vec<ExchangeOffer>> {
+        let cache_key = format!("exchange|{league}|{have}|{want}");
+        if let Some(hit) = self.exchange_cache_get(&cache_key) {
+            return Ok(hit);
+        }
+        let url = format!("{TRADE_BASE}/exchange/{league}");
+        // The trade2 currency-exchange endpoint takes the query under a top-level
+        // `exchange` object (NOT the item-search `query`/`sort` shape, which it
+        // rejects). PoE2 requires `engine: "new"`.
+        let payload = serde_json::json!({
+            "exchange": { "status": { "option": "online" }, "have": [have], "want": [want] },
+            "engine": "new"
+        });
+        let resp = self
+            .send_with_retry(&self.default_limiter, Endpoint::Exchange, || {
+                self.http.post(&url).json(&payload)
+            })
+            .await
+            .context("trade2 exchange search failed")?;
+        let v: Value = resp.json().await?;
+        let id = v
+            .get("id")
+            .and_then(|x| x.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let hashes: Vec<String> = v
+            .get("result")
+            .and_then(|x| x.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|h| h.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if id.is_empty() || hashes.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Exchange fetch: the exchange endpoint returns offers ordered best-ratio-first,
+        // so the top offers are in the first batch. Fetch only the first ≤10 hashes
+        // rather than all batches: our only consumer (WatchlistSource::edges) uses just
+        // the top-of-book offer, so fetching further pages wastes requests on the shared
+        // Exchange rate bucket. (Relates to known fetch-batching follow-up.)
+        let mut offers = Vec::new();
+        if let Some(csv) = fetch_batches(&hashes).into_iter().next() {
+            let furl = format!("{TRADE_BASE}/fetch/{csv}?query={id}&exchange");
+            let fv: Value = self
+                .send_with_retry(&self.default_limiter, Endpoint::Exchange, || {
+                    self.http.get(&furl)
+                })
+                .await
+                .context("trade2 exchange fetch failed")?
+                .json()
+                .await?;
+            offers.extend(parse_exchange(&fv, have, want));
+        }
+        // Best ratio first (most `want` per `have`).
+        offers.sort_by(|a, b| {
+            let ra = a.get_amount as f64 / a.pay_amount.max(1) as f64;
+            let rb = b.get_amount as f64 / b.pay_amount.max(1) as f64;
+            rb.partial_cmp(&ra).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        self.exchange_cache_put(&cache_key, &offers);
+        Ok(offers)
+    }
+
+    /// Returns cached exchange offers for `key` if the entry is younger than 60s.
+    fn exchange_cache_get(&self, key: &str) -> Option<Vec<ExchangeOffer>> {
+        use std::time::Duration;
+        let guard = self
+            .exchange_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        guard.get(key).and_then(|(ts, offers)| {
+            if ts.elapsed() < Duration::from_secs(60) {
+                Some(offers.clone())
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Inserts `offers` into the exchange cache under `key`, pruning stale entries.
+    fn exchange_cache_put(&self, key: &str, offers: &[ExchangeOffer]) {
+        use std::time::{Duration, Instant};
+        let mut guard = self
+            .exchange_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        guard.retain(|_, (ts, _)| ts.elapsed() < Duration::from_secs(60));
+        guard.insert(key.to_string(), (Instant::now(), offers.to_vec()));
     }
 
     /// Fetches the raw `data/stats` catalog JSON.
@@ -883,6 +1058,48 @@ mod tests {
         assert_eq!(batches[0].split(',').count(), 10);
         assert_eq!(batches[2].split(',').count(), 5);
         assert!(fetch_batches(&[]).is_empty()); // empty input → no requests
+    }
+
+    /// Offline parse test: verifies `parse_exchange` against the committed
+    /// synthetic fixture (src/trade/fixtures/exchange_pair.json).
+    ///
+    /// The fixture is SYNTHETIC, modeled on the documented trade2 exchange
+    /// /fetch?exchange response shape. Pending live validation via the
+    /// `#[ignore]`d `capture_exchange_fixture` test below.
+    #[test]
+    fn parses_exchange_fixture() {
+        let v: Value = serde_json::from_str(include_str!("fixtures/exchange_pair.json")).unwrap();
+        let offers = parse_exchange(&v, "exalted", "divine");
+        assert!(
+            !offers.is_empty(),
+            "expected at least one offer from fixture"
+        );
+        let best = &offers[0];
+        assert!(
+            best.get_amount > 0 && best.pay_amount > 0 && best.stock > 0,
+            "best offer must have non-zero amounts and stock: {best:?}"
+        );
+        // All offers should have the correct currency labels applied.
+        assert!(offers
+            .iter()
+            .all(|o| o.pay_currency == "exalted" && o.get_currency == "divine"));
+    }
+
+    /// Operator test (network): captures a live trade2 exchange fixture.
+    ///
+    /// Run once with:
+    ///   `POESESSID=... ARB_TEST_LEAGUE="<active>" cargo test capture_exchange_fixture -- --ignored --nocapture`
+    /// Then trim the printed offers to ~3 listings and save as
+    /// `src/trade/fixtures/exchange_pair.json` to replace the synthetic fixture.
+    #[tokio::test]
+    #[ignore = "network: captures a live trade2 exchange fixture"]
+    async fn capture_exchange_fixture() {
+        let rates = std::sync::Arc::new(std::sync::RwLock::new(RateTable::default()));
+        let client = TradeClient::new(std::env::var("POESESSID").ok(), rates).unwrap();
+        let league = std::env::var("ARB_TEST_LEAGUE").unwrap_or_else(|_| "Standard".into());
+        let offers = client.exchange("exalted", "divine", &league).await.unwrap();
+        println!("offers: {offers:#?}");
+        assert!(!offers.is_empty(), "expected at least one offer");
     }
 
     #[tokio::test]

@@ -19,6 +19,7 @@ use crate::trade::client::{parse_rate_rules, RateRule};
 pub enum Endpoint {
     Search,
     Fetch,
+    Exchange,
 }
 
 /// One endpoint's learned rules + a sliding window of recent send instants.
@@ -51,10 +52,11 @@ impl Bucket {
     }
 }
 
-/// Per-member limiter with independent Search and Fetch buckets.
+/// Per-member limiter with independent Search, Fetch, and Exchange buckets.
 pub struct RateLimiter {
     search: Mutex<Bucket>,
     fetch: Mutex<Bucket>,
+    exchange: Mutex<Bucket>,
 }
 
 impl Default for RateLimiter {
@@ -69,6 +71,7 @@ impl RateLimiter {
         RateLimiter {
             search: Mutex::new(Bucket::with_defaults()),
             fetch: Mutex::new(Bucket::with_defaults()),
+            exchange: Mutex::new(Bucket::with_defaults()),
         }
     }
 
@@ -78,6 +81,7 @@ impl RateLimiter {
         RateLimiter {
             search: Mutex::new(Bucket::empty()),
             fetch: Mutex::new(Bucket::empty()),
+            exchange: Mutex::new(Bucket::empty()),
         }
     }
 
@@ -85,6 +89,7 @@ impl RateLimiter {
         match ep {
             Endpoint::Search => &self.search,
             Endpoint::Fetch => &self.fetch,
+            Endpoint::Exchange => &self.exchange,
         }
     }
 
@@ -330,6 +335,13 @@ mod tests {
         lim.observe(Endpoint::Search, &h).await;
         // The shared 10s window seeds max(4, 3) = 4 — NOT 4 + 3 = 7.
         assert_eq!(lim.search.lock().await.sends.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn exchange_bucket_is_independent_and_permissive_never_waits() {
+        let rl = RateLimiter::permissive();
+        // Should return immediately (no rules) for the new endpoint.
+        rl.acquire(Endpoint::Exchange).await;
     }
 
     #[tokio::test]

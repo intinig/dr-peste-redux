@@ -1,3 +1,4 @@
+pub mod arb;
 pub mod embeds;
 pub mod farm;
 pub mod harvest;
@@ -24,6 +25,7 @@ pub struct Data {
     pub sessions: Arc<crate::trade::session::MemberSessions>,
     pub categories: crate::trade::categories::CategoryCatalog,
     pub value: Arc<RwLock<crate::trade::value::ValueModel>>,
+    pub arb: std::sync::Arc<crate::arb::ArbEngine>,
 }
 
 pub type Error = anyhow::Error;

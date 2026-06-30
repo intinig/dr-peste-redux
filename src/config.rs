@@ -10,6 +10,12 @@ pub struct Config {
     pub proxy: Option<crate::trade::session::ProxyConfig>,
     pub session_ttl_mins: u64,
     pub observation_log_path: String,
+    pub arb_watchlist: Vec<String>,
+    pub arb_min_profit_pct: f64,
+    pub arb_min_spread_pct: f64,
+    pub arb_min_volume: f64,
+    pub arb_max_cycle_len: usize,
+    pub arb_top_n: usize,
 }
 
 impl Config {
@@ -75,6 +81,48 @@ impl Config {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "observations.jsonl".to_string());
 
+        let arb_watchlist = match get("ARB_WATCHLIST").filter(|s| !s.is_empty()) {
+            Some(v) => v
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
+            None => ["divine", "exalted", "chaos", "annul", "regal", "vaal"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        };
+        let arb_min_profit_pct = match get("ARB_MIN_PROFIT_PCT") {
+            Some(v) => v
+                .parse::<f64>()
+                .context("ARB_MIN_PROFIT_PCT must be a number")?,
+            None => 0.03,
+        };
+        let arb_min_spread_pct = match get("ARB_MIN_SPREAD_PCT") {
+            Some(v) => v
+                .parse::<f64>()
+                .context("ARB_MIN_SPREAD_PCT must be a number")?,
+            None => 0.03,
+        };
+        let arb_min_volume = match get("ARB_MIN_VOLUME") {
+            Some(v) => v
+                .parse::<f64>()
+                .context("ARB_MIN_VOLUME must be a number")?,
+            None => 0.0,
+        };
+        let arb_max_cycle_len = match get("ARB_MAX_CYCLE_LEN") {
+            Some(v) => v
+                .parse::<usize>()
+                .context("ARB_MAX_CYCLE_LEN must be a usize")?,
+            None => 4,
+        };
+        let arb_top_n = match get("ARB_CONFIRM_TOP_N") {
+            Some(v) => v
+                .parse::<usize>()
+                .context("ARB_CONFIRM_TOP_N must be a usize")?,
+            None => 8,
+        };
+
         Ok(Self {
             discord_token,
             guild_id,
@@ -84,6 +132,12 @@ impl Config {
             proxy,
             session_ttl_mins,
             observation_log_path,
+            arb_watchlist,
+            arb_min_profit_pct,
+            arb_min_spread_pct,
+            arb_min_volume,
+            arb_max_cycle_len,
+            arb_top_n,
         })
     }
 }
@@ -95,6 +149,12 @@ impl std::fmt::Debug for Config {
             .field("guild_id", &self.guild_id)
             .field("poll_interval_mins", &self.poll_interval_mins)
             .field("min_volume", &self.min_volume)
+            .field("arb_watchlist", &self.arb_watchlist)
+            .field("arb_min_profit_pct", &self.arb_min_profit_pct)
+            .field("arb_min_spread_pct", &self.arb_min_spread_pct)
+            .field("arb_min_volume", &self.arb_min_volume)
+            .field("arb_max_cycle_len", &self.arb_max_cycle_len)
+            .field("arb_top_n", &self.arb_top_n)
             .finish()
     }
 }
@@ -239,5 +299,34 @@ mod tests {
         })
         .unwrap();
         assert_eq!(cfg.observation_log_path, "/data/observations.jsonl");
+    }
+
+    #[test]
+    fn arb_defaults_apply_when_unset() {
+        let cfg = Config::from_lookup(|k| match k {
+            "DISCORD_TOKEN" => Some("t".into()),
+            "GUILD_ID" => Some("1".into()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(cfg.arb_max_cycle_len, 4);
+        assert_eq!(cfg.arb_top_n, 8);
+        assert_eq!(
+            cfg.arb_watchlist,
+            vec!["divine", "exalted", "chaos", "annul", "regal", "vaal"]
+        );
+        assert!((cfg.arb_min_profit_pct - 0.03).abs() < 1e-9);
+    }
+
+    #[test]
+    fn arb_watchlist_parses_csv() {
+        let cfg = Config::from_lookup(|k| match k {
+            "DISCORD_TOKEN" => Some("t".into()),
+            "GUILD_ID" => Some("1".into()),
+            "ARB_WATCHLIST" => Some("divine, exalted ,chaos".into()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(cfg.arb_watchlist, vec!["divine", "exalted", "chaos"]);
     }
 }
