@@ -250,32 +250,38 @@ pub fn breakdown_embed(
         )))
 }
 
-/// Concrete buy/sell line for a flip market, priced in the cheaper currency so
-/// the numbers are human-sized (e.g. "1 divine: buy ~250 chaos / sell ~230 chaos").
-/// `ab` = a→b (pay a, get b); `ba` = b→a (pay b, get a). "buy 1 X" = what you pay
-/// taking the best offer; "sell" = what you receive — the gap is the maker spread.
+/// Concrete maker buy/sell line for a flip market, priced in the cheaper
+/// currency (e.g. "1 divine: buy ~230 chaos / sell ~250 chaos").
+///
+/// A flip is a MAKER play: you post a resting buy near the current best bid and
+/// a resting sell near the current best ask, capturing the gap — so "buy" is the
+/// LOW price (the bid) and "sell" is the HIGH price (the ask). Taking both sides
+/// would just pay the spread; the point is to provide liquidity, not cross it.
+///
+/// `ab` = a→b (pay a, get b) → taker ASK for b; `ba` = b→a (pay b, get a) → taker BID for b.
 fn flip_display(
     a: &str,
     b: &str,
     ab: &crate::arb::model::RatioQuote,
     ba: &crate::arb::model::RatioQuote,
 ) -> String {
-    let a_per_b_buy = ab.pay as f64 / ab.get as f64; // a paid to buy 1 b
-    if a_per_b_buy >= 1.0 {
+    let ask_b_in_a = ab.pay as f64 / ab.get as f64; // a to BUY 1 b as a taker (high)
+    if ask_b_in_a >= 1.0 {
         // b is the more valuable side — price 1 b in units of a.
-        let a_per_b_sell = ba.get as f64 / ba.pay as f64; // a received selling 1 b
+        let bid_b_in_a = ba.get as f64 / ba.pay as f64; // a you GET selling 1 b (low)
         format!(
             "1 {b}: buy ~{} {a} / sell ~{} {a}",
-            fmt_amt(a_per_b_buy),
-            fmt_amt(a_per_b_sell)
+            fmt_amt(bid_b_in_a), // buy near the bid (low)
+            fmt_amt(ask_b_in_a)  // sell near the ask (high)
         )
     } else {
-        let b_per_a_buy = ba.pay as f64 / ba.get as f64; // b paid to buy 1 a
-        let b_per_a_sell = ab.get as f64 / ab.pay as f64; // b received selling 1 a
+        // a is the more valuable side — price 1 a in units of b.
+        let ask_a_in_b = ba.pay as f64 / ba.get as f64; // b to BUY 1 a (high)
+        let bid_a_in_b = ab.get as f64 / ab.pay as f64; // b you GET selling 1 a (low)
         format!(
             "1 {a}: buy ~{} {b} / sell ~{} {b}",
-            fmt_amt(b_per_a_buy),
-            fmt_amt(b_per_a_sell)
+            fmt_amt(bid_a_in_b),
+            fmt_amt(ask_a_in_b)
         )
     }
 }
@@ -360,7 +366,7 @@ pub fn arb_embed(opps: &[Opportunity], league: &str) -> serenity::CreateEmbed {
         .title("⚖️ Currency arbitrage")
         .description(lines)
         .footer(serenity::CreateEmbedFooter::new(format!(
-            "{league} • execute manually in-game; ratios move fast"
+            "{league} • flips: post resting buy+sell orders to earn the spread · cycles: take each leg in order · ratios move fast"
         )))
 }
 
@@ -393,15 +399,15 @@ mod tests {
             stock: 100,
             freshness: Freshness::Live,
         };
-        // chaos/divine: 250 chaos buys 1 divine; selling 1 divine yields 230 chaos.
-        // divine is the valuable side → price 1 divine in chaos.
+        // chaos/divine: ask 250 chaos to buy 1 divine, bid 230 selling 1 divine.
+        // A maker flip buys LOW (near 230) and sells HIGH (near 250) — buy < sell.
         let s = flip_display("chaos", "divine", &q(250, 1), &q(1, 230));
-        assert_eq!(s, "1 divine: buy ~250 chaos / sell ~230 chaos");
+        assert_eq!(s, "1 divine: buy ~230 chaos / sell ~250 chaos");
 
-        // divine/exalted: 1 divine ≈ 250 exalted → divine is valuable, priced in exalted.
+        // divine/exalted: ask 260 ex to buy 1 divine, bid 250 selling 1 divine.
         // ab = divine->exalted (pay 1 div, get 250 ex); ba = exalted->divine (pay 260 ex, get 1 div).
         let s2 = flip_display("divine", "exalted", &q(1, 250), &q(260, 1));
-        assert_eq!(s2, "1 divine: buy ~260 exalted / sell ~250 exalted");
+        assert_eq!(s2, "1 divine: buy ~250 exalted / sell ~260 exalted");
     }
 
     fn item(divine: f64, exalted: f64, chaos: f64) -> PricedItem {
