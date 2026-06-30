@@ -254,7 +254,12 @@ pub fn arb_embed(opps: &[Opportunity], league: &str) -> serenity::CreateEmbed {
     let mut lines = String::new();
     for (i, o) in opps.iter().enumerate() {
         match o {
-            Opportunity::Triangulation { legs, multiplier, feasible_volume, .. } => {
+            Opportunity::Triangulation {
+                legs,
+                multiplier,
+                feasible_volume,
+                ..
+            } => {
                 let path = std::iter::once(legs[0].from.as_str())
                     .chain(legs.iter().map(|l| l.to.as_str()))
                     .collect::<Vec<_>>()
@@ -267,7 +272,12 @@ pub fn arb_embed(opps: &[Opportunity], league: &str) -> serenity::CreateEmbed {
                     feasible_volume
                 ));
             }
-            Opportunity::Flip { market, spread_pct, volume, .. } => {
+            Opportunity::Flip {
+                market,
+                spread_pct,
+                volume,
+                ..
+            } => {
                 lines.push_str(&format!(
                     "**{}. Flip** `{} / {}`  {:.1}% spread  (~{:.0} vol)\n",
                     i + 1,

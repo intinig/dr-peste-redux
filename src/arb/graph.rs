@@ -51,9 +51,15 @@ impl RateGraph {
         // Start a DFS from each node; only keep cycles that return to the start.
         for start in &self.nodes {
             let mut path: Vec<Leg> = Vec::new();
-            self.dfs(start, start, max_len, min_profit, &mut path, &mut found, &mut seen);
+            self.dfs(
+                start, start, max_len, min_profit, &mut path, &mut found, &mut seen,
+            );
         }
-        found.sort_by(|a, b| b.multiplier.partial_cmp(&a.multiplier).unwrap_or(std::cmp::Ordering::Equal));
+        found.sort_by(|a, b| {
+            b.multiplier
+                .partial_cmp(&a.multiplier)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         found
     }
 
@@ -71,7 +77,9 @@ impl RateGraph {
         if path.len() >= max_len {
             return;
         }
-        let Some(neighbors) = self.adj.get(current) else { return };
+        let Some(neighbors) = self.adj.get(current) else {
+            return;
+        };
         for (to, quote) in neighbors {
             // Closing the cycle back to start.
             if to.as_str() == start {
@@ -79,7 +87,11 @@ impl RateGraph {
                     continue; // triangulation is length >= 3
                 }
                 let mut legs = path.clone();
-                legs.push(Leg { from: current.to_string(), to: to.clone(), quote: quote.clone() });
+                legs.push(Leg {
+                    from: current.to_string(),
+                    to: to.clone(),
+                    quote: quote.clone(),
+                });
                 if let Some(res) = evaluate_cycle(&legs) {
                     if res.multiplier > 1.0 + min_profit {
                         let key = canonical_key(&legs);
@@ -94,7 +106,11 @@ impl RateGraph {
             if path.iter().any(|l| l.from.as_str() == to.as_str()) {
                 continue;
             }
-            path.push(Leg { from: current.to_string(), to: to.clone(), quote: quote.clone() });
+            path.push(Leg {
+                from: current.to_string(),
+                to: to.clone(),
+                quote: quote.clone(),
+            });
             self.dfs(start, to, max_len, min_profit, path, out, seen);
             path.pop();
         }
@@ -118,7 +134,11 @@ fn evaluate_cycle(legs: &[Leg]) -> Option<CycleResult> {
             feasible = cap;
         }
     }
-    Some(CycleResult { legs: legs.to_vec(), multiplier, feasible_volume: feasible })
+    Some(CycleResult {
+        legs: legs.to_vec(),
+        multiplier,
+        feasible_volume: feasible,
+    })
 }
 
 /// Rotation-invariant key so the same cycle discovered from different start
@@ -140,7 +160,12 @@ mod tests {
         Edge {
             from: from.into(),
             to: to.into(),
-            quote: RatioQuote { pay, get, stock, freshness: Freshness::Live },
+            quote: RatioQuote {
+                pay,
+                get,
+                stock,
+                freshness: Freshness::Live,
+            },
         }
     }
 
@@ -178,7 +203,11 @@ mod tests {
         ];
         let g = RateGraph::from_edges(&edges);
         let c = &g.profitable_cycles(4, 0.0)[0];
-        assert!((c.feasible_volume - 100.0).abs() < 1e-6, "got {}", c.feasible_volume);
+        assert!(
+            (c.feasible_volume - 100.0).abs() < 1e-6,
+            "got {}",
+            c.feasible_volume
+        );
     }
 
     #[test]

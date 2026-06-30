@@ -250,11 +250,18 @@ fn parse_exchange(v: &Value, have: &str, want: &str) -> Vec<ExchangeOffer> {
         for o in offers {
             // `exchange` = what the seller wants from us (our `have`/pay).
             // `item`     = what the seller gives (our `want`/get), with stock.
-            let pay_amount =
-                o.pointer("/exchange/amount").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
-            let get_amount =
-                o.pointer("/item/amount").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
-            let stock = o.pointer("/item/stock").and_then(|x| x.as_u64()).unwrap_or(0);
+            let pay_amount = o
+                .pointer("/exchange/amount")
+                .and_then(|x| x.as_u64())
+                .unwrap_or(0) as u32;
+            let get_amount = o
+                .pointer("/item/amount")
+                .and_then(|x| x.as_u64())
+                .unwrap_or(0) as u32;
+            let stock = o
+                .pointer("/item/stock")
+                .and_then(|x| x.as_u64())
+                .unwrap_or(0);
             if pay_amount == 0 || get_amount == 0 {
                 continue;
             }
@@ -294,7 +301,8 @@ pub struct TradeClient {
     >,
     /// Short-lived cache for exchange offers, keyed by `"exchange|<league>|<have>|<want>"`.
     /// Same 60-second TTL as `cache` — keeps repeated `/arb` calls polite.
-    #[allow(dead_code)] // read by exchange_cache_get/put, which are consumed by the arb module (future task)
+    #[allow(dead_code)]
+    // read by exchange_cache_get/put, which are consumed by the arb module (future task)
     exchange_cache: std::sync::Mutex<
         std::collections::HashMap<String, (std::time::Instant, Vec<ExchangeOffer>)>,
     >,
@@ -444,7 +452,12 @@ impl TradeClient {
     /// per `have`). Uses the operator/anonymous session and the Exchange rate
     /// bucket. Politeness: results are cached for 60 seconds.
     #[allow(dead_code)] // called by the arb module (future task)
-    pub async fn exchange(&self, have: &str, want: &str, league: &str) -> Result<Vec<ExchangeOffer>> {
+    pub async fn exchange(
+        &self,
+        have: &str,
+        want: &str,
+        league: &str,
+    ) -> Result<Vec<ExchangeOffer>> {
         let cache_key = format!("exchange|{league}|{have}|{want}");
         if let Some(hit) = self.exchange_cache_get(&cache_key) {
             return Ok(hit);
@@ -462,11 +475,19 @@ impl TradeClient {
             .await
             .context("trade2 exchange search failed")?;
         let v: Value = resp.json().await?;
-        let id = v.get("id").and_then(|x| x.as_str()).unwrap_or_default().to_string();
+        let id = v
+            .get("id")
+            .and_then(|x| x.as_str())
+            .unwrap_or_default()
+            .to_string();
         let hashes: Vec<String> = v
             .get("result")
             .and_then(|x| x.as_array())
-            .map(|a| a.iter().filter_map(|h| h.as_str().map(String::from)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|h| h.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
         if id.is_empty() || hashes.is_empty() {
             return Ok(Vec::new());
@@ -498,7 +519,10 @@ impl TradeClient {
     /// Returns cached exchange offers for `key` if the entry is younger than 60s.
     fn exchange_cache_get(&self, key: &str) -> Option<Vec<ExchangeOffer>> {
         use std::time::Duration;
-        let guard = self.exchange_cache.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = self
+            .exchange_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         guard.get(key).and_then(|(ts, offers)| {
             if ts.elapsed() < Duration::from_secs(60) {
                 Some(offers.clone())
@@ -511,7 +535,10 @@ impl TradeClient {
     /// Inserts `offers` into the exchange cache under `key`, pruning stale entries.
     fn exchange_cache_put(&self, key: &str, offers: &[ExchangeOffer]) {
         use std::time::{Duration, Instant};
-        let mut guard = self.exchange_cache.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = self
+            .exchange_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         guard.retain(|_, (ts, _)| ts.elapsed() < Duration::from_secs(60));
         guard.insert(key.to_string(), (Instant::now(), offers.to_vec()));
     }
@@ -1032,17 +1059,21 @@ mod tests {
     /// `#[ignore]`d `capture_exchange_fixture` test below.
     #[test]
     fn parses_exchange_fixture() {
-        let v: Value =
-            serde_json::from_str(include_str!("fixtures/exchange_pair.json")).unwrap();
+        let v: Value = serde_json::from_str(include_str!("fixtures/exchange_pair.json")).unwrap();
         let offers = parse_exchange(&v, "exalted", "divine");
-        assert!(!offers.is_empty(), "expected at least one offer from fixture");
+        assert!(
+            !offers.is_empty(),
+            "expected at least one offer from fixture"
+        );
         let best = &offers[0];
         assert!(
             best.get_amount > 0 && best.pay_amount > 0 && best.stock > 0,
             "best offer must have non-zero amounts and stock: {best:?}"
         );
         // All offers should have the correct currency labels applied.
-        assert!(offers.iter().all(|o| o.pay_currency == "exalted" && o.get_currency == "divine"));
+        assert!(offers
+            .iter()
+            .all(|o| o.pay_currency == "exalted" && o.get_currency == "divine"));
     }
 
     /// Operator test (network): captures a live trade2 exchange fixture.

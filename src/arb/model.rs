@@ -51,10 +51,20 @@ pub struct Leg {
 
 #[derive(Clone, Debug)]
 pub enum Opportunity {
-    Triangulation { legs: Vec<Leg>, multiplier: f64, feasible_volume: f64, #[allow(dead_code)] // Phase 2: read by the Phase 2 confirm stage
-confidence: Freshness },
-    Flip { market: (Currency, Currency), spread_pct: f64, volume: f64, #[allow(dead_code)] // Phase 2: read by the Phase 2 confirm stage
-confidence: Freshness },
+    Triangulation {
+        legs: Vec<Leg>,
+        multiplier: f64,
+        feasible_volume: f64,
+        #[allow(dead_code)] // Phase 2: read by the Phase 2 confirm stage
+        confidence: Freshness,
+    },
+    Flip {
+        market: (Currency, Currency),
+        spread_pct: f64,
+        volume: f64,
+        #[allow(dead_code)] // Phase 2: read by the Phase 2 confirm stage
+        confidence: Freshness,
+    },
 }
 
 impl Opportunity {
@@ -76,10 +86,14 @@ impl Opportunity {
     }
     pub fn score(&self) -> f64 {
         match self {
-            Opportunity::Triangulation { multiplier, feasible_volume, .. } => {
-                (multiplier - 1.0) * feasible_volume
-            }
-            Opportunity::Flip { spread_pct, volume, .. } => spread_pct * volume,
+            Opportunity::Triangulation {
+                multiplier,
+                feasible_volume,
+                ..
+            } => (multiplier - 1.0) * feasible_volume,
+            Opportunity::Flip {
+                spread_pct, volume, ..
+            } => spread_pct * volume,
         }
     }
     #[allow(dead_code)] // Phase 2: called by the Phase 2 confirm stage
@@ -97,13 +111,22 @@ mod tests {
 
     #[test]
     fn ratio_is_get_over_pay() {
-        let q = RatioQuote { pay: 2, get: 5, stock: 100, freshness: Freshness::Live };
+        let q = RatioQuote {
+            pay: 2,
+            get: 5,
+            stock: 100,
+            freshness: Freshness::Live,
+        };
         assert!((q.ratio() - 2.5).abs() < 1e-9);
     }
 
     #[test]
     fn triangulation_score_is_profit_times_volume() {
-        let c = crate::arb::graph::CycleResult { legs: vec![], multiplier: 1.2, feasible_volume: 50.0 };
+        let c = crate::arb::graph::CycleResult {
+            legs: vec![],
+            multiplier: 1.2,
+            feasible_volume: 50.0,
+        };
         let opp = Opportunity::from_cycle(c, Freshness::Live);
         assert!((opp.score() - 10.0).abs() < 1e-9); // 0.2 * 50
     }

@@ -19,7 +19,8 @@ pub fn scan(edges: &[Edge], min_spread: f64, min_volume: f64) -> Vec<FlipResult>
         by_pair.insert((e.from.clone(), e.to.clone()), e);
     }
     let mut out: Vec<FlipResult> = Vec::new();
-    let mut done: std::collections::HashSet<(Currency, Currency)> = std::collections::HashSet::new();
+    let mut done: std::collections::HashSet<(Currency, Currency)> =
+        std::collections::HashSet::new();
     for e in edges {
         let (a, b) = if e.from <= e.to {
             (e.from.clone(), e.to.clone())
@@ -29,14 +30,21 @@ pub fn scan(edges: &[Edge], min_spread: f64, min_volume: f64) -> Vec<FlipResult>
         if !done.insert((a.clone(), b.clone())) {
             continue;
         }
-        let (Some(ab), Some(ba)) = (by_pair.get(&(a.clone(), b.clone())), by_pair.get(&(b.clone(), a.clone()))) else {
+        let (Some(ab), Some(ba)) = (
+            by_pair.get(&(a.clone(), b.clone())),
+            by_pair.get(&(b.clone(), a.clone())),
+        ) else {
             continue;
         };
         let product = ab.quote.ratio() * ba.quote.ratio();
         let spread_pct = (1.0 - product).max(0.0);
         let volume = ab.quote.stock.min(ba.quote.stock) as f64;
         if spread_pct >= min_spread && volume >= min_volume {
-            out.push(FlipResult { market: (a, b), spread_pct, volume });
+            out.push(FlipResult {
+                market: (a, b),
+                spread_pct,
+                volume,
+            });
         }
     }
     out.sort_by(|x, y| {
@@ -53,7 +61,16 @@ mod tests {
     use crate::arb::model::{Freshness, RatioQuote};
 
     fn edge(from: &str, to: &str, pay: u32, get: u32, stock: u64) -> Edge {
-        Edge { from: from.into(), to: to.into(), quote: RatioQuote { pay, get, stock, freshness: Freshness::Live } }
+        Edge {
+            from: from.into(),
+            to: to.into(),
+            quote: RatioQuote {
+                pay,
+                get,
+                stock,
+                freshness: Freshness::Live,
+            },
+        }
     }
 
     #[test]

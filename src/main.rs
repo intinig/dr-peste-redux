@@ -145,7 +145,8 @@ async fn main() -> Result<()> {
         std::time::Duration::from_secs(config.session_ttl_mins * 60),
     ));
 
-    let arb_client = std::sync::Arc::new(TradeClient::new(config.poesessid.clone(), rates.clone())?);
+    let arb_client =
+        std::sync::Arc::new(TradeClient::new(config.poesessid.clone(), rates.clone())?);
     let arb_source = std::sync::Arc::new(crate::arb::source::WatchlistSource::new(
         arb_client,
         config.arb_watchlist.clone(),

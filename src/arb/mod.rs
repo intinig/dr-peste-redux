@@ -1,7 +1,7 @@
-pub mod model;
 pub mod graph;
-pub mod spread;
+pub mod model;
 pub mod source;
+pub mod spread;
 
 use crate::arb::model::{Freshness, Opportunity};
 use crate::arb::source::CandidateSource;
@@ -43,11 +43,7 @@ impl ArbEngine {
         for f in flips {
             opps.push(Opportunity::from_flip(f, Freshness::Live));
         }
-        opps.sort_by(|a, b| {
-            b.score()
-                .partial_cmp(&a.score())
-                .unwrap_or(Ordering::Equal)
-        });
+        opps.sort_by(|a, b| b.score().partial_cmp(&a.score()).unwrap_or(Ordering::Equal));
         opps.truncate(self.cfg.top_n);
         Ok(opps)
     }
