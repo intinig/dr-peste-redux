@@ -1,3 +1,4 @@
+mod arb;
 mod config;
 mod discord;
 mod itemtext;
