@@ -23,6 +23,11 @@ pub async fn help(ctx: Context<'_>) -> Result<(), Error> {
             false,
         )
         .field(
+            "/arb",
+            "Find currency flip and triangulation opportunities to execute manually in-game.",
+            false,
+        )
+        .field(
             "/paste (first time)",
             "On your first rare price-check, the bot asks for your POESESSID (kept in memory only) so it can search trade as you.",
             false,
