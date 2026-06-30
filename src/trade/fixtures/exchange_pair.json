@@ -1,36 +1,34 @@
 {
-  "result": [
-    {
-      "id": "hash1",
+  "id": "Bg2VE50Qh8",
+  "complexity": null,
+  "result": {
+    "11ee48420c39c3ce8225f6bedd7b3d982c64a229e55c95b885e706": {
+      "id": "57150e1c7711ee48420c39c3ce8225f6bedd7b3d982c64a229e55c95b885e706",
+      "item": null,
       "listing": {
-        "indexed": "2026-06-29T12:00:00Z",
-        "account": { "name": "AccountOne" },
+        "indexed": "2026-06-29T13:35:59+00:00",
+        "account": { "name": "AccountOne", "online": { "league": "Runes of Aldur" } },
         "offers": [
-          { "exchange": { "currency": "exalted", "amount": 240 },
-            "item": { "currency": "divine", "amount": 1, "stock": 8 } }
+          {
+            "exchange": { "amount": 240, "currency": "exalted", "whisper": "{0} Exalted Orb" },
+            "item": { "amount": 1, "currency": "divine", "id": "x1", "stock": 8, "whisper": "{0} Divine Orb" }
+          }
         ]
       }
     },
-    {
-      "id": "hash2",
+    "564a9e5cad200dcd4cbc526e013a68a0dccc6395012a48c3fd39a8": {
+      "id": "f8dd4ff1a3564a9e5cad200dcd4cbc526e013a68a0dccc6395012a48c3fd39a8",
+      "item": null,
       "listing": {
-        "indexed": "2026-06-29T12:05:00Z",
-        "account": { "name": "AccountTwo" },
+        "indexed": "2026-06-29T13:40:00+00:00",
+        "account": { "name": "AccountTwo", "online": { "league": "Runes of Aldur" } },
         "offers": [
-          { "exchange": { "currency": "exalted", "amount": 255 },
-            "item": { "currency": "divine", "amount": 1, "stock": 15 } }
-        ]
-      }
-    },
-    {
-      "id": "hash3",
-      "listing": {
-        "account": { "name": "AccountThree" },
-        "offers": [
-          { "exchange": { "currency": "exalted", "amount": 500 },
-            "item": { "currency": "divine", "amount": 2, "stock": 6 } }
+          {
+            "exchange": { "amount": 255, "currency": "exalted", "whisper": "{0} Exalted Orb" },
+            "item": { "amount": 1, "currency": "divine", "id": "x2", "stock": 15, "whisper": "{0} Divine Orb" }
+          }
         ]
       }
     }
-  ]
+  }
 }

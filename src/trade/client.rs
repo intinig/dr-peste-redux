@@ -227,21 +227,38 @@ pub struct ExchangeOffer {
     pub stock: u64,
 }
 
-/// Parse a trade2 exchange `/fetch?exchange` response into offers.
+/// Error unless the exchange search response carries a `result` object.
 ///
-/// Field paths follow the documented contract:
-/// `result[].listing.offers[].exchange.amount` — what the seller wants (our pay).
-/// `result[].listing.offers[].item.amount`     — what the seller gives (our get).
-/// `result[].listing.offers[].item.stock`      — units the seller has in stock.
+/// A missing or non-object `result` signals a malformed/error response (rate
+/// limit, error envelope, or a shape change), which we surface rather than
+/// silently returning zero offers — the exact silent-failure class this code
+/// path is meant to avoid. A genuinely empty market is `result: {}`, still an
+/// object, so it passes here and parses to zero offers without erroring.
+fn require_result_object(v: &Value) -> Result<()> {
+    if v.get("result").is_some_and(|x| x.is_object()) {
+        Ok(())
+    } else {
+        anyhow::bail!("trade2 exchange response missing 'result' object");
+    }
+}
+
+/// Parse a trade2 currency-exchange search response into offers.
 ///
-/// This fixture is SYNTHETIC, modeled on the documented shape, pending live
-/// validation via the `#[ignore]`d `capture_exchange_fixture` test.
+/// The exchange endpoint embeds the listings INLINE in the search response:
+/// `result` is an object keyed by listing hash (NOT the array of hash strings
+/// the item-search endpoint returns — and there is no separate `/fetch` step).
+/// Within each listing:
+/// `listing.offers[].exchange.amount` — what the seller wants (our pay).
+/// `listing.offers[].item.amount`     — what the seller gives (our get).
+/// `listing.offers[].item.stock`      — units the seller has in stock.
+///
+/// Shape validated against a live capture of the PoE2 `/exchange` endpoint.
 fn parse_exchange(v: &Value, have: &str, want: &str) -> Vec<ExchangeOffer> {
     let mut out = Vec::new();
-    let Some(results) = v.get("result").and_then(|x| x.as_array()) else {
+    let Some(listings) = v.get("result").and_then(|x| x.as_object()) else {
         return out;
     };
-    for r in results {
+    for r in listings.values() {
         let Some(offers) = r.pointer("/listing/offers").and_then(|x| x.as_array()) else {
             continue;
         };
@@ -480,41 +497,13 @@ impl TradeClient {
             .await
             .context("trade2 exchange search failed")?;
         let v: Value = resp.json().await?;
-        let id = v
-            .get("id")
-            .and_then(|x| x.as_str())
-            .unwrap_or_default()
-            .to_string();
-        let hashes: Vec<String> = v
-            .get("result")
-            .and_then(|x| x.as_array())
-            .map(|a| {
-                a.iter()
-                    .filter_map(|h| h.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
-        if id.is_empty() || hashes.is_empty() {
-            return Ok(Vec::new());
-        }
-        // Exchange fetch: the exchange endpoint returns offers ordered best-ratio-first,
-        // so the top offers are in the first batch. Fetch only the first ≤10 hashes
-        // rather than all batches: our only consumer (WatchlistSource::edges) uses just
-        // the top-of-book offer, so fetching further pages wastes requests on the shared
-        // Exchange rate bucket. (Relates to known fetch-batching follow-up.)
-        let mut offers = Vec::new();
-        if let Some(csv) = fetch_batches(&hashes).into_iter().next() {
-            let furl = format!("{TRADE_BASE}/fetch/{csv}?query={id}&exchange");
-            let fv: Value = self
-                .send_with_retry(&self.default_limiter, Endpoint::Exchange, || {
-                    self.http.get(&furl)
-                })
-                .await
-                .context("trade2 exchange fetch failed")?
-                .json()
-                .await?;
-            offers.extend(parse_exchange(&fv, have, want));
-        }
+        // Surface malformed/error responses instead of silently returning no
+        // offers (an empty market is still a `result: {}` object, so it passes).
+        require_result_object(&v)?;
+        // The exchange endpoint embeds the listings INLINE in the search
+        // response (`result` is a hash->listing map), so parse the offers
+        // directly — there is no separate `/fetch` step for the exchange.
+        let mut offers = parse_exchange(&v, have, want);
         // Best ratio first (most `want` per `have`).
         offers.sort_by(|a, b| {
             let ra = a.get_amount as f64 / a.pay_amount.max(1) as f64;
@@ -1083,6 +1072,18 @@ mod tests {
         assert!(offers
             .iter()
             .all(|o| o.pay_currency == "exalted" && o.get_currency == "divine"));
+    }
+
+    #[test]
+    fn require_result_object_distinguishes_empty_from_malformed() {
+        use serde_json::json;
+        // Empty market: `result` is an (empty) object → OK, parses to 0 offers.
+        assert!(require_result_object(&json!({"result": {}})).is_ok());
+        assert!(require_result_object(&json!({"result": {"h": {}}})).is_ok());
+        // Malformed/error responses → error, not a silent empty result.
+        assert!(require_result_object(&json!({"error": "rate limited"})).is_err());
+        assert!(require_result_object(&json!({"result": []})).is_err()); // item-search shape
+        assert!(require_result_object(&json!({"result": "x"})).is_err());
     }
 
     /// Operator test (network): captures a live trade2 exchange fixture.
