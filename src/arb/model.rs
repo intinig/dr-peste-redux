@@ -10,6 +10,7 @@ pub type Currency = String;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Freshness {
     Live,
+    #[allow(dead_code)] // Phase 2: constructed by the Phase 2 cxapi source
     Aggregated,
 }
 
@@ -21,6 +22,7 @@ pub struct RatioQuote {
     pub get: u32,
     /// Units of `to` available at this quote (taker depth).
     pub stock: u64,
+    #[allow(dead_code)] // Phase 2: read by the Phase 2 confirm stage
     pub freshness: Freshness,
 }
 
@@ -49,8 +51,10 @@ pub struct Leg {
 
 #[derive(Clone, Debug)]
 pub enum Opportunity {
-    Triangulation { legs: Vec<Leg>, multiplier: f64, feasible_volume: f64, confidence: Freshness },
-    Flip { market: (Currency, Currency), spread_pct: f64, volume: f64, confidence: Freshness },
+    Triangulation { legs: Vec<Leg>, multiplier: f64, feasible_volume: f64, #[allow(dead_code)] // Phase 2: read by the Phase 2 confirm stage
+confidence: Freshness },
+    Flip { market: (Currency, Currency), spread_pct: f64, volume: f64, #[allow(dead_code)] // Phase 2: read by the Phase 2 confirm stage
+confidence: Freshness },
 }
 
 impl Opportunity {
@@ -78,6 +82,7 @@ impl Opportunity {
             Opportunity::Flip { spread_pct, volume, .. } => spread_pct * volume,
         }
     }
+    #[allow(dead_code)] // Phase 2: called by the Phase 2 confirm stage
     pub fn confidence(&self) -> Freshness {
         match self {
             Opportunity::Triangulation { confidence, .. } => *confidence,
