@@ -1,5 +1,6 @@
 use poise::serenity_prelude as serenity;
 
+use crate::arb::model::Opportunity;
 use crate::itemtext::ParsedItem;
 use crate::poeninja::model::PricedItem;
 use crate::poeninja::League;
@@ -246,6 +247,46 @@ pub fn breakdown_embed(
         .footer(serenity::CreateEmbedFooter::new(format!(
             "live trade • {} • not affiliated with GGG",
             league.name
+        )))
+}
+
+pub fn arb_embed(opps: &[Opportunity], league: &str) -> serenity::CreateEmbed {
+    let mut lines = String::new();
+    for (i, o) in opps.iter().enumerate() {
+        match o {
+            Opportunity::Triangulation { legs, multiplier, feasible_volume, .. } => {
+                let path = std::iter::once(legs[0].from.as_str())
+                    .chain(legs.iter().map(|l| l.to.as_str()))
+                    .collect::<Vec<_>>()
+                    .join(" → ");
+                lines.push_str(&format!(
+                    "**{}. Cycle** `{}`  +{:.1}%  (~{:.0} vol)\n",
+                    i + 1,
+                    path,
+                    (multiplier - 1.0) * 100.0,
+                    feasible_volume
+                ));
+            }
+            Opportunity::Flip { market, spread_pct, volume, .. } => {
+                lines.push_str(&format!(
+                    "**{}. Flip** `{} / {}`  {:.1}% spread  (~{:.0} vol)\n",
+                    i + 1,
+                    market.0,
+                    market.1,
+                    spread_pct * 100.0,
+                    volume
+                ));
+            }
+        }
+    }
+    if lines.is_empty() {
+        lines.push_str("Nothing above thresholds.");
+    }
+    serenity::CreateEmbed::new()
+        .title("⚖️ Currency arbitrage")
+        .description(lines)
+        .footer(serenity::CreateEmbedFooter::new(format!(
+            "{league} • execute manually in-game; ratios move fast"
         )))
 }
 

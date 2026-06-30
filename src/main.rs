@@ -145,6 +145,22 @@ async fn main() -> Result<()> {
         std::time::Duration::from_secs(config.session_ttl_mins * 60),
     ));
 
+    let arb_client = std::sync::Arc::new(TradeClient::new(config.poesessid.clone(), rates.clone())?);
+    let arb_source = std::sync::Arc::new(crate::arb::source::WatchlistSource::new(
+        arb_client,
+        config.arb_watchlist.clone(),
+    ));
+    let arb_engine = std::sync::Arc::new(crate::arb::ArbEngine::new(
+        arb_source,
+        crate::arb::ArbConfig {
+            max_cycle_len: config.arb_max_cycle_len,
+            min_profit_pct: config.arb_min_profit_pct,
+            min_spread_pct: config.arb_min_spread_pct,
+            min_volume: config.arb_min_volume,
+            top_n: config.arb_top_n,
+        },
+    ));
+
     // Best-effort initial refresh so commands have data quickly.
     if let Err(e) = refresh_once(&client, &store, &rates).await {
         tracing::warn!(error = %e, "initial refresh failed; will retry in background");
@@ -167,6 +183,7 @@ async fn main() -> Result<()> {
                 discord::paste::paste(),
                 discord::logout::logout(),
                 discord::help::help(),
+                discord::arb::arb(),
             ],
             ..Default::default()
         })
@@ -183,6 +200,7 @@ async fn main() -> Result<()> {
                     sessions,
                     categories: category_catalog,
                     value: value.clone(),
+                    arb: arb_engine,
                 })
             })
         })
